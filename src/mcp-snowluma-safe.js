@@ -532,6 +532,45 @@ server.tool(
   }
 );
 
+server.tool(
+  'qq_send_image',
+  '向指定群或私聊发送一张图片。file 填写 http(s) 图片直链，或 SnowLuma 能读到的本机绝对路径。' +
+    'groupId 与 userId 二选一：传 groupId 发群、传 userId 发私聊。' +
+    '目标必须命中白名单（群看 allow.groups，私聊看 allow.private），否则拒绝；同样受模式、暂停与频率闸门约束。' +
+    '图片由 SnowLuma 侧抓取，直链失效、需要登录或防盗链时会失败——失败就换一张，不要把失败原因当成对方没收到。' +
+    '发送成功后不要在正文里再复述一遍地址。',
+  {
+    file: z.string().describe('图片地址：http(s) 直链，或本机绝对路径'),
+    groupId: z.union([z.number(), z.string()]).optional().describe('群号（与 userId 二选一，必须在白名单内）'),
+    userId: z.union([z.number(), z.string()]).optional().describe('好友 QQ 号（与 groupId 二选一，必须在白名单内）'),
+    replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+  },
+  async ({ file, groupId, userId, replyToMessageId, token }) => {
+    try {
+      const cleanFile = unquoteJsonString(String(file ?? '').trim());
+      if (!cleanFile) return { content: [{ type: 'text', text: 'file 不能为空' }], isError: true };
+      const hasGroup = groupId !== undefined && groupId !== null && String(groupId).trim() !== '';
+      const hasUser = userId !== undefined && userId !== null && String(userId).trim() !== '';
+      if (hasGroup === hasUser) return { content: [{ type: 'text', text: 'groupId 与 userId 必须且只能传一个' }], isError: true };
+      const data = await agentApi('/api/send/image', {
+        method: 'POST',
+        ...(token ? { headers: { 'x-agent-token': token } } : {}),
+        body: JSON.stringify({
+          groupId: hasGroup ? String(groupId) : undefined,
+          userId: hasUser ? String(userId) : undefined,
+          file: cleanFile,
+          replyToMessageId,
+          token: token || undefined
+        })
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `发送失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
 // ── 二代仿真模式（reserved2）工具 ─────────────────────────────────────────
 server.tool(
   'qq_get_prompt',
