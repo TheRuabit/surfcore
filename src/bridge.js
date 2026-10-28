@@ -7960,13 +7960,15 @@ async function main() {
         }
 
         // ── 统一发送端点（MCP 旧发送工具也走这里） ───────────────────────────
-        if (req.method === 'POST' && (url.pathname === '/api/send/group' || url.pathname === '/api/send/private' || url.pathname === '/api/send/reply')) {
+        if (req.method === 'POST' && (url.pathname === '/api/send/group' || url.pathname === '/api/send/private' || url.pathname === '/api/send/reply' || url.pathname === '/api/send/image')) {
           const body = await readBody();
           const token = String(body.token ?? '').trim();
-          const isPrivate = url.pathname === '/api/send/private';
+          const isImage = url.pathname === '/api/send/image';
+          const wantsPrivate = String(body.userId ?? '').trim() !== '' && String(body.groupId ?? '').trim() === '';
+          const isPrivate = url.pathname === '/api/send/private' || (isImage && wantsPrivate);
           const isReply = url.pathname === '/api/send/reply';
           const targetId = isPrivate ? String(body.userId ?? '').trim() : String(body.groupId ?? '').trim();
-          const message = unquoteJsonString(String(body.message ?? '').trim());
+          const message = isImage ? String(body.file ?? '').trim() : unquoteJsonString(String(body.message ?? '').trim());
           // 引用 id 与端点无关：/api/send/reply 与另两个端点都允许带（是否真的引用由下游按 id 判断）。
           // 旧写法 `isReply ? body.replyToMessageId : body.replyToMessageId` 两个分支一模一样，
           // 保留 isReply 变量只是为了下面的端点语义判断，别再让人以为这里有过分支逻辑。
@@ -7983,7 +7985,7 @@ async function main() {
             sendJson({ ok: false, error: 'AI 已暂停，当前不允许执行发送工具' }, 403);
             return;
           }
-          if (!targetId || !message) { sendJson({ ok: false, error: '目标 id 和 message 不能为空' }, 400); return; }
+          if (!targetId || !message) { sendJson({ ok: false, error: isImage ? '目标 id 和 file 不能为空' : '目标 id 和 message 不能为空' }, 400); return; }
           if (isPrivate && atUserId) { sendJson({ ok: false, error: '私聊不需要 @' }, 400); return; }
           if (isReply && (replyToMessageId === undefined || replyToMessageId === null || String(replyToMessageId).trim() === '')) {
             sendJson({ ok: false, error: 'replyToMessageId 不能为空' }, 400);
@@ -7991,7 +7993,7 @@ async function main() {
           }
           if (currentMode === 'reserved2' && !token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           if (token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          const flag = isPrivate ? 'sendPrivate' : (isReply ? 'reply' : 'sendGroup');
+          const flag = isImage ? 'sendImage' : (isPrivate ? 'sendPrivate' : (isReply ? 'reply' : 'sendGroup'));
           if (token && !v2ToolEnabled(flag)) { sendJson({ ok: false, error: `工具未启用：${flag}` }, 403); return; }
           if (shouldBlockSilentReply(key)) {
             sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403);
@@ -8023,7 +8025,7 @@ async function main() {
           }
           const sendCfg = cfg.socialV2?.send ?? {};
           const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
-          if (message.length > maxChars) { sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字；内容太长先总结/挑重点，不要拆成 10 条刷屏` }, 400); return; }
+          if (!isImage && message.length > maxChars) { sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字；内容太长先总结/挑重点，不要拆成 10 条刷屏` }, 400); return; }
           if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
           // st/now 必须声明在 try **之外**：下面的 catch 要用它们回滚预占的发送额度。
           // 写在 try 里时 catch 拿到的是块作用域外的名字 ⇒ ReferenceError（send-burst
@@ -8043,7 +8045,19 @@ async function main() {
             }
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-            const sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
+            let sentMessages;
+            if (isImage) {
+              const segments = [];
+              if (actualReplyToMessageId !== undefined && actualReplyToMessageId !== null && String(actualReplyToMessageId).trim() !== '') {
+                segments.push({ type: 'reply', data: { id: String(actualReplyToMessageId).trim() } });
+              }
+              if (atUserId) segments.push({ type: 'at', data: { qq: String(atUserId) } });
+              segments.push({ type: 'image', data: { file: message } });
+              await onebotSendSegments(kind, id, segments);
+              sentMessages = [message];
+            } else {
+              sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
+            }
             recordSentMessagesV2(key, sentMessages);
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
