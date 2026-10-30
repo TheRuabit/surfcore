@@ -57,6 +57,10 @@ const BIDI_DEFAULTS = {
     allDay: false, dm: false, dmScope: 'owner', live: false, liveRoom: '', liveScope: 'owner',
   },
   share: { enabled: true, via: 'dynamic', minScore: 13, silentAfterDays: 3, decayPerDay: 1 },
+  // 扫码登录页（2026-10-29）：默认是 B站 统一登录页。海外注册的号若在 passport 页
+  // 登不进去（只能从 www.bilibili.com/en 登录），把它改成那个入口再扫码即可 ——
+  // 登录成功拿到的还是 .bilibili.com 的 SESSDATA，API 侧完全一样。
+  loginUrl: '',
   fishGuard: DEFAULT_BILI_FISH_GUARD,
   toolsPath: '',
 };

@@ -46,6 +46,11 @@ export const DEFAULTS = {
   dynamics: { enabled: true, gapMin: 30, kinds: {} },
   // 2026-10-23 用户定：默认发自己的动态（视频卡片），不再默认评论区 @ 主人。
   share: { enabled: true, via: 'dynamic', minScore: 13, silentAfterDays: 3, decayPerDay: 1 },  // 分享型开关与评分阈值
+  // 发言边界（2026-10-29 用户定）：false = **不在别人的视频/评论区主动说话**。
+  //   只影响两本账：comment（顶层评论）与 ta（主动搭话）；
+  //   reply（回找我的人）与 mine（回自己动态）不受影响，仍走各自的 limits 额度。
+  //   默认 true，缺省行为与旧版本完全一致。
+  behavior: { publicComment: true },
   // 倾听（2026-10-18 补默认值，与设置页对齐）：评论区 + 直播间
   listen: { comment: true, commentIntervalSec: 300, scope: 'both', oncePerPerson: false, allDay: false, dm: false, live: false, liveRoom: '', liveScope: 'owner' },
   // 作息：windows[] = 每天允许醒来的时段（每个窗口 = 一次机会）；maxWakesPerDay 缺省 = 窗口数（硬上限 3）

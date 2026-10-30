@@ -100,6 +100,10 @@ const LOCAL_EXECUTION_TOOLS = [
   'read', 'read_image', 'write', 'edit', 'str_replace_editor',
   // 文件检索
   'glob', 'grep',
+  // 工作目录切换（本地文件系统入口）
+  'working_directory',
+  // 视频分析（QQ 群拿不到本地视频，贴链接解析成本也不适合群聊节奏）
+  'video_probe', 'video_storyboard', 'video_zoom', 'video_locate',
   // 自带运行时（Python/Node/pnpm 的绝对路径）⇒ 等于把"跑代码"递给模型
   'load_workspace_dependencies',
   // 派生 agent 与编排（都能间接拿到 shell）

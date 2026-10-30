@@ -23,7 +23,18 @@ import { spawn } from 'node:child_process';
 import { BILI_CRED, OWNER_BILI_CRED } from './paths.js';
 import { readBiliConfig, saveBiliConfig } from './store.js';
 
-const LOGIN_URL = 'https://passport.bilibili.com/login';
+const DEFAULT_LOGIN_URL = 'https://passport.bilibili.com/login';
+
+// 扫码页可配（2026-10-29）：海外注册的号可能只能从 www.bilibili.com/en 登进去，
+// 在统一的 passport 页反而登不了。这里允许 bili.config.json 的 loginUrl 覆盖。
+// 无论从哪个页面登录，拿到的都是 .bilibili.com 域的 SESSDATA，后续 API 调用完全一致。
+function loginUrl() {
+  try {
+    const custom = String(readBiliConfig()?.config?.loginUrl ?? '').trim();
+    if (custom) return custom;
+  } catch { /* 配置读不到就回落默认 */ }
+  return String(process.env.SURFCORE_BILI_LOGIN_URL ?? '').trim() || DEFAULT_LOGIN_URL;
+}
 const SESSION_TTL_MS = 170_000;      // B站 二维码大约 180 秒过期，留 10 秒余量
 const START_WAIT_MS = 20_000;        // 等 Edge/CDP 起来
 const QR_WAIT_MS = 18_000;           // 等登录页画出二维码
@@ -353,7 +364,7 @@ export async function startQrLogin({ target = 'owner', expectedMid = '', expecte
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 560, height: 760, deviceScaleFactor: 1, mobile: false });
-    await cdp.send('Page.navigate', { url: LOGIN_URL });
+    await cdp.send('Page.navigate', { url: loginUrl() });
     const image = await waitForQrImage(cdp, QR_WAIT_MS);
     if (!image) throw new Error('没等到二维码：B站 登录页可能被风控/改版，过一会儿重试或手动粘贴 cookie');
 

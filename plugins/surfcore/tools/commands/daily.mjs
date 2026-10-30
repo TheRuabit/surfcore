@@ -360,6 +360,14 @@ if (!out) {
 
 // ── 记账 ──────────────────────────────────────────────────────
 const dynId = (out.match(/dyn_id[=: ]+(\d+)/i) ?? out.match(/dynId[=: ]+(\d+)/i) ?? [])[1] ?? ''
+// 2026-10-29 修：拿到 dyn_id 才算真的发出去了。
+//   以前这里是**无条件**写 STATE —— 发布失败（dynId 为空）也会被记成
+//   「今天这类已发」，于是当天所有重试都被这一条假记录挡住，
+//   只能人工删 daily-dynamic.json 才能恢复。
+if (!dynId) {
+  console.error('✗ 没拿到 dyn_id —— 动态没发出去，今天不记账（可以重试）')
+  process.exit(1)
+}
 const at = new Date().toISOString()
 const atText = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 st[KIND] = {

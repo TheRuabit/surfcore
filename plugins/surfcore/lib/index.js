@@ -1966,6 +1966,28 @@ export function apply(ctx) {
     }
   }
 
+  // 黑话库：原样转发到桥接的 /api/slang*（2026-10-30 补）。
+  // 真相在桥接内存里的 slangEntries，插件不另存一份 —— 否则确认一条之后两边状态会打架。
+  async function handleSlang(req, res, url) {
+    const suffix = url.pathname.slice(`${API_PREFIX}/slang`.length) || '';
+    const target = `${consoleBase()}/api/slang${suffix}${url.search || ''}`;
+    const headers = { 'x-console-token': consoleToken() };
+    const init = { method: req.method };
+    const method = String(req.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') {
+      init.body = await readBody(req);
+      headers['content-type'] = 'application/json';
+    }
+    init.headers = headers;
+    try {
+      const r = await fetch(target, init);
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json; charset=utf-8' });
+      res.end(buf);
+    } catch (e) {
+      json(res, 502, { ok: false, error: `黑话库不可达（桥接是否在运行？）：${e?.message ?? e}` });
+    }
+  }
   // 桌宠：安装 / 卸载 / 启动 / 停止 / 状态（本机文件，不经过桥接）
   let electronJob = null;
 
@@ -2852,6 +2874,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     if (pathname === `${API_PREFIX}/token-budget`) { await handleTokenBudget(req, res, url); return; }
     if (pathname === `${API_PREFIX}/updates`) { await handleUpdates(req, res); return; }
     if (pathname.startsWith(`${API_PREFIX}/bili/`)) { await handleBili(req, res, url); return; }
+    if (pathname.startsWith(`${API_PREFIX}/slang`)) { await handleSlang(req, res, url); return; }
     if (pathname === `${API_PREFIX}/logs`) { handleLogs(res, url); return; }
     if (pathname === `${API_PREFIX}/owner-audit`) { await handleOwnerAudit(req, res, url); return; }
     if (pathname === `${API_PREFIX}/browse`) { await handleBrowse(req, res, url); return; }

@@ -67,6 +67,12 @@ import {
   blockMessage, evaluateBudget, localDayKey, readBudget, readDailyUsage,
 } from './token-budget.js';
 import { createBiliMemory } from './bili-memory.js';
+import { createSlangExtractor } from './slang-extractor.js';
+import { createExtractorModelClient, resolveExtractorConfig } from './extractor-model.js';
+import { createEmbedder } from './memory-embed.js';
+import { createMemoryStore } from './memory-store.js';
+import { createBM25Store } from './memory-bm25.js';
+import { createShadowRetriever } from './memory-shadow.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
@@ -2679,6 +2685,120 @@ async function main() {
     return slangTaskChain;
   }
 
+  // ── 黑话候选发现器 + 长期记忆（2026-10-30）────────────────────────────
+  // 和旧的 slang-learner 完全隔离：不开持久会话、不 replay 历史、不联网研究。
+  // 生产默认 slangMode=off，这条链路是死的；改成 extractor 才跑。
+  let slangExtractor = null;
+  let slangExtractorBroken = '';
+
+  function slangModeNow() {
+    const mode = String(cfg.slang?.mode || '').trim();
+    if (mode === 'extractor' || mode === 'legacy' || mode === 'off') return mode;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return 'off';
+    return 'legacy';
+  }
+
+  function recordExtractorUsage(usage) {
+    try {
+      fs.appendFileSync(TOKEN_USAGE_FILE, JSON.stringify({
+        k: 'turn', t: Date.now(), sid: 'slang-extractor', key: 'internal:黑话提取',
+        seq: 0, turn: 0, step: 1, retry: 0,
+        model: usage.model, provider: usage.provider,
+        b: { cacheMiss: Number(usage.cacheMiss) || 0, cacheHit: Number(usage.cacheHit) || 0, cacheWrite: 0, output: Number(usage.outputTokens) || 0, reasoning: 0 },
+      }) + '\\n');
+    } catch { /* 记账失败不影响提取 */ }
+  }
+
+  function ensureSlangExtractor() {
+    if (slangExtractor) return slangExtractor;
+    if (slangExtractorBroken) return null;
+    const exCfg = resolveExtractorConfig(cfg.slang?.extractor);
+    if (!exCfg.ready) { slangExtractorBroken = exCfg.why; log('[黑话提取] 未启用：' + exCfg.why); return null; }
+    let askModel = null;
+    try { askModel = createExtractorModelClient({ config: exCfg, log, onUsage: recordExtractorUsage }); }
+    catch (error) { slangExtractorBroken = String(error?.message ?? error); log('[黑话提取] 模型客户端不可用：' + slangExtractorBroken); return null; }
+    const exOpts = cfg.slang?.extractor || {};
+    slangExtractor = createSlangExtractor({
+      stateDir: STATE_DIR,
+      log,
+      loadMessages: (key) => { const st = getSocialV2State(key); return { messages: Array.isArray(st.recentMessages) ? st.recentMessages : [] }; },
+      askModel,
+      onCandidate: ({ term, guess, evidence }) => {
+        const patch = { countIncrement: 1, source: 'extractor' };
+        if (guess) patch.meaning = guess;
+        if (Array.isArray(evidence) && evidence.length) patch.evidence = evidence.map((text) => ({ text }));
+        upsertSlangEntry(slangEntries, term, patch);
+        saveSlangStore();
+      },
+      minMessages: Number(exOpts.minMessages) > 0 ? Number(exOpts.minMessages) : 6,
+      maxBatch: Number(exOpts.maxBatch) > 0 ? Number(exOpts.maxBatch) : 60,
+      cooldownMs: Number(exOpts.cooldownMs) >= 0 ? Number(exOpts.cooldownMs) : 300000,
+    });
+    log('[黑话提取] 已就绪（' + exCfg.provider + ' · ' + exCfg.model + '）');
+    return slangExtractor;
+  }
+
+  function maybeRunSlangExtractor(key) {
+    if (slangModeNow() !== 'extractor') return;
+    const ex = ensureSlangExtractor();
+    if (!ex) return;
+    void ex.runOnce(key).catch((error) => log('[黑话提取] 运行失败：' + String(error?.message ?? error)));
+  }
+
+  // ── 长期记忆（第一阶段：归档 + shadow 检索）───────────────────────────
+  let memoryStore = null;
+  let memoryShadow = null;
+  const vmCfg = () => (cfg.vectorMemory && typeof cfg.vectorMemory === 'object' ? cfg.vectorMemory : {});
+  function memoryEnabled() { const c = vmCfg(); return c.enabled === true || c.shadow === true; }
+  function ensureMemory() {
+    if (memoryStore) return memoryStore;
+    if (!memoryEnabled()) return null;
+    try {
+      const c = vmCfg();
+      const archiveFile = path.join(STATE_DIR, c.archiveFile || 'message-archive.jsonl');
+      const retriever = String(c.retriever || 'bm25').trim();
+      let how = '';
+      if (retriever === 'bm25') {
+        memoryStore = createBM25Store({ file: archiveFile, log });
+        how = 'retriever=bm25';
+      } else {
+        const embedder = createEmbedder({ provider: c.embedProvider || 'hash' });
+        memoryStore = createMemoryStore({ file: archiveFile, embedder, log });
+        how = 'retriever=' + embedder.provider + ' dim=' + embedder.dim;
+      }
+      const loaded = memoryStore.load();
+      log('[记忆] 已加载 ' + loaded.loaded + ' 条归档（' + how + '）');
+      if (c.shadow === true) {
+        memoryShadow = createShadowRetriever({ store: memoryStore, file: path.join(STATE_DIR, c.shadowFile || 'memory-shadow.jsonl'), log, topK: Number(c.topK) > 0 ? Number(c.topK) : 8 });
+      }
+    } catch (error) {
+      log('[记忆] 初始化失败（不影响主流程）：' + String(error?.message ?? error));
+      memoryStore = null; memoryShadow = null;
+    }
+    return memoryStore;
+  }
+
+  function archiveMemory(key, msg) {
+    const store = ensureMemory();
+    if (!store || !msg) return;
+    const text = String(msg.plain ?? msg.text ?? '').trim();
+    if (!text) return;
+    if (/^\\[(图片|表情|转发消息|拍一拍|视频|语音|文件|动画表情)\\]$/.test(text)) return;
+    if (/^@\\S+\\s*$/.test(text)) return;
+    if (text.length <= 1) return;
+    try {
+      store.add({ key, seq: msg.seq, messageId: msg.messageId, sender: msg.sender, userId: msg.userId, time: msg.time, replyTo: msg.quoteTargetIsSelf ? 'self' : '', type: 'message', text });
+    } catch (error) { log('[记忆] 归档失败：' + String(error?.message ?? error)); }
+  }
+
+  function probeMemoryShadow(key, query, sender) {
+    if (!memoryShadow) return;
+    const text = String(query ?? '').trim();
+    if (!text) return;
+    try { memoryShadow.probe({ key, query: text, sender }); }
+    catch (error) { log('[记忆] shadow 失败：' + String(error?.message ?? error)); }
+  }
+
   async function ensureSlangLearnerSession() {
     const preset = resolvePresetName(cfg.slang?.learnerPreset || cfg.agentPreset, { strict: true });
     if (!preset) throw new Error('黑话学习缺少已验证的安全 preset，拒绝创建或复用会话');
@@ -2755,7 +2875,7 @@ async function main() {
   }
 
   async function runSlangExtraction(key) {
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     if (learnerBudgetBlock()) return;
     const messages = slangWindows.get(key) ?? [];
@@ -2823,7 +2943,7 @@ async function main() {
 
   async function runSlangResearch(candidates) {
     if (!candidates || !candidates.length) return;
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     if (learnerBudgetBlock()) return;
     // 过滤掉已经在研究队列里的候选，避免同一批被重复排队研究。
@@ -2877,7 +2997,7 @@ async function main() {
   }
 
   function maybeQueueSlangExtraction(key) {
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     const cooldown = Number(cfg.slang?.extractCooldownMs ?? 300000);
     const last = slangExtractionCooldowns.get(key) ?? 0;
@@ -2892,7 +3012,7 @@ async function main() {
   // 黑话学习素材入口：群聊普通消息进入滚动窗口（命令/角色控制语不学；
   // 只学当前消息自己的文字，不学引用原文）。一代/二代共用。
   function feedSlangWindow(key, sender, plainContent) {
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!key || !plainContent || typeof plainContent !== 'string') return;
     const text = plainContent.trim();
     if (!text || text.startsWith('/')) return;
@@ -2953,7 +3073,10 @@ async function main() {
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
     const parts = [timeLine];
     if (cfg.slang?.enabled !== false) {
-      const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
+      const slText = String(promptText || '');
+      const relevant = slangEntries.filter((e) => e && e.status === SLANG_STATUS.CONFIRMED
+        && e.content && e.meaning && slText.includes(String(e.content)));
+      const block = relevant.length ? buildSlangContext(relevant, cfg.slang?.injectMax ?? 8) : '';
       if (block) parts.push(block);
     }
     return parts.join('\n\n') + '\n\n' + promptText;
@@ -11442,6 +11565,8 @@ async function main() {
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+    // 长期记忆 shadow：每轮唤醒检索一次，只记日志、不注入（2026-10-30）
+    probeMemoryShadow(key, promptText);
     // Recheck queued wakes at dispatch time: no model call while paused/disabled
     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
     const wakeBlocked = () => opts.wakeReason && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false);
@@ -12403,6 +12528,7 @@ async function main() {
     st.preSleepWaitObservedAt = 0;
     st.preSleepWaitAccumMs = 0;
     st.recentMessages.push(msg);
+    archiveMemory(key, msg);
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
@@ -13438,11 +13564,13 @@ async function main() {
       if (candidate.isSelf) {
         // 自己以前发的消息只进 recent 帮助理解上下文，不进未读（不需要“处理”）。
         st.recentMessages.push(msg);
+    archiveMemory(key, msg);
         continue;
       }
       msg.seq = (st.lastUnreadSeq || 0) + 1;
       st.lastUnreadSeq = msg.seq;
       st.recentMessages.push(msg);
+    archiveMemory(key, msg);
       st.unread.push(msg);
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
@@ -15240,8 +15368,12 @@ async function main() {
   const biliGroupList = (list) => (Array.isArray(list) ? list : [])
     .map((v) => String(v).trim())
     .filter((v) => /^\d+$/.test(v));
+  // 分享目标额外接受 private:<uin>（2026-10-30：主人要"别进群，私发给我"）
+  const biliShareTargetList = (list) => (Array.isArray(list) ? list : [])
+    .map((v) => String(v).trim())
+    .filter((v) => /^\d+$/.test(v) || /^private:\d+$/.test(v));
   if (cfg.biliBridge?.enabled) {
-    const shareGroups = biliGroupList(cfg.biliBridge.share.groups.length ? cfg.biliBridge.share.groups : cfg.allow.groups);
+    const shareGroups = biliShareTargetList(cfg.biliBridge.share.groups.length ? cfg.biliBridge.share.groups : cfg.allow.groups);
     const dynamicsGroups = biliGroupList(cfg.biliBridge.dynamics.groups.length ? cfg.biliBridge.dynamics.groups : cfg.allow.groups);
     if (cfg.biliBridge.memory.enabled) {
       void biliMemory.refresh({ force: true });
