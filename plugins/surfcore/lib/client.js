@@ -946,7 +946,16 @@ F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { 
         F("chat.proactive.minMessages", "最少消息数", "", "number", { min: 1 }),
       ]},
       { group: "黑话学习", fields: [
-        F("slang.enabled", "启用黑话学习", "", "switch"),
+        // 2026-10-30：把"注入"和"学习"拆成两个开关 —— 它们本来就是两回事：
+        //   注入 = 已确认词条进 prompt；学习 = 自动发现新词。
+        // 以前只有一个 enabled 同时管两件，关学习会连带关掉注入。
+        F("slang.enabled", "黑话注入（词典进提示词）", "关掉 = 已确认词条不再进 prompt；不影响采集/提取", "switch"),
+        F("slang.learn", "自动学习（采集 + 提取）", "关掉 = 不再自动发现新词；不影响已确认词条的注入", "switch"),
+        F("slang.mode", "学习链路", "off=全停 / legacy=旧会话 replay / extractor=无状态发现器", "select",
+          { options: [["off", "off"], ["legacy", "legacy"], ["extractor", "extractor"]] }),
+        F("slang.extractor.provider", "extractor provider", "deepseek-openai / openai / local", "select",
+          { options: [["deepseek-openai", "deepseek-openai"], ["openai", "openai"], ["local", "local"]] }),
+        F("slang.extractor.model", "extractor 模型", "留空用该 provider 默认"),
         F("slang.extractMinMessages", "触发提取的最少消息", "", "number", { min: 1 }),
         F("slang.extractCooldownMs", "提取冷却（ms）", "", "number"),
         F("slang.inferenceThresholds", "推断阈值", "逗号分隔，例如 2，4，8", "list"),
@@ -1888,6 +1897,28 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
     function QQTab({ cfg, set, admin, setAdmin, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
       const [query, setQuery] = useState("");
       const tools = Object.keys(cfg?.socialV2?.tools ?? {});
+      // 黑话候选审核（2026-10-30）：后端一直有 /api/slang，界面以前完全没有。
+      // 只在这里只读展示 + 单条确认/删除；批量操作留给 API/命令行，避免误点。
+      const [slangBox, setSlangBox] = useState({ candidates: [], confirmed: [] });
+      const [slangBusy, setSlangBusy] = useState("");
+      const loadSlang = useCallback(async () => {
+        try {
+          // API 常量本身已经是 "/dsh-surfcore/api"，这里再写 /api/slang 会变成
+          // /dsh-surfcore/api/api/slang —— 于是列表永远是空的，界面只显示"候选 0"。
+          const [c, ok] = await Promise.all([api("/slang?status=candidate"), api("/slang?status=confirmed")]);
+          setSlangBox({ candidates: c.entries ?? [], confirmed: ok.entries ?? [] });
+        } catch (e) {
+          // 以前是静默 catch：失败看起来就像"没有候选"。现在至少能看到原因。
+          toast("✗ 黑话候选加载失败：" + (e?.message ?? e));
+        }
+      }, []);
+      useEffect(() => { loadSlang(); }, [loadSlang]);
+      const slangAct = async (path, body) => {
+        setSlangBusy(path);
+        try { await api(path, { method: "POST", body }); await loadSlang(); toast("✓ 黑话库已更新"); }
+        catch (e) { toast("✗ " + e.message); }
+        finally { setSlangBusy(""); }
+      };
       const groups = [...QQ_FIELDS];
       if (tools.length) {
         groups.push({ group: "二代 · 工具开关", note: "关掉即从模型工具面移除", fields: tools.map((key) => F(`socialV2.tools.${key}`, TOOL_LABELS[key] ?? key, key, "switch")) });
@@ -2011,7 +2042,26 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
               h("select", { className: "qbw-select", value: overview?.mode?.effective ?? "reserved2", onChange: async (e) => {
                 try { await api("/mode", { method: "POST", body: { mode: e.target.value } }); toast(`✓ 模式已切到 ${e.target.value}`); await reload(); } catch (err) { toast(`✗ ${err.message}`); }
               } },
-                [["chat", "chat（一代普通）"], ["reserved", "reserved（一代仿真）"], ["reserved2", "reserved2（二代仿真）"], ["closed-agent", "closed-agent（封闭）"], ["simulation", "simulation（=reserved2）"]].map(([v, l]) => h("option", { key: v, value: v }, l)))) : null,
+                [["chat", "chat（一代普通）"], ["reserved", "reserved（一代仿真）"], ["reserved2", "reserved2（二代仿真）"], ["closed-agent", "closed-agent（封闭）"], ["simulation", "simulation（=reserved2）"]].map(([v, l]) => h("option", { key: v, value: v }, l))))
+              : g.group === "黑话学习" ? h("div", { className: "qbw-card", style: { marginTop: "8px" } },
+                h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                  h("h4", { style: { margin: 0 } }, `候选 ${slangBox.candidates.length} · 已确认 ${slangBox.confirmed.length}`),
+                  h(Btn, { kind: "qbw-btn2", onClick: loadSlang, disabled: !!slangBusy }, "刷新")),
+                h("p", { className: "qbw-hint" }, "只有填了释义的才进提示词 —— 无释义的确认了也不会生效。确认后再点底部「保存」不影响这里，黑话库是即时生效的。"),
+                slangBox.candidates.length === 0
+                  ? h("p", { className: "qbw-hint" }, "（没有候选）")
+                  : null,
+                ...slangBox.candidates.slice(0, 25).map((e) => h("div", { key: e.id, style: { display: "flex", alignItems: "center", gap: "6px", padding: "3px 0" } },
+                  h("span", { style: { flex: 1 } }, `「${e.content}」${e.meaning ? "" : " · 无释义"}`),
+                  h(Btn, { kind: "qbw-btn2", disabled: !!slangBusy || !e.meaning, title: e.meaning ? undefined : "先补释义才能确认", onClick: () => slangAct("/slang/batch-confirm", { ids: [e.id] }) }, "确认"),
+                  h(Btn, { kind: "qbw-btn2", disabled: !!slangBusy, onClick: () => slangAct("/slang/batch-reject", { ids: [e.id] }) }, "删"))),
+                slangBox.candidates.length > 25
+                  ? h("p", { className: "qbw-hint" }, `只显示前 25 条，共 ${slangBox.candidates.length} 条（用 /api/slang 批量处理）`)
+                  : null,
+                slangBox.confirmed.length
+                  ? h("p", { className: "qbw-hint" }, "已确认：" + slangBox.confirmed.map((e) => e.content).join(" · "))
+                  : null)
+              : null,
           })),
         h("div", { className: "qbw-actions" },
           h(Btn, { kind: "qbw-btn2", onClick: async () => {

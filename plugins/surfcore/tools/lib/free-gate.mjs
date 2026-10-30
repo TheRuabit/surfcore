@@ -58,7 +58,17 @@ const LABELS = { comment: '条普通评论', reply: '条回复', ta: '条搭话'
  *          upMid?: string, bvid?: string, parent?: string, toMid?: string}} opts
  */
 export function checkFree({ kind = 'comment', upMid = '', bvid = '', parent = '', toMid = '' } = {}) {
-  const L = freeLimits(config())
+  const cfg = config()
+  // 发言边界（2026-10-29 用户定）：publicComment=false → 顶层评论与主动搭话一律拒。
+  //   reply（回找我的人）与 mine（回自己动态）不在这里拦，仍走各自的 limits 额度。
+  //   注意不能用 limits 设 0 来代替：0 的语义是「关闭上限（不限量）」，正好相反。
+  if (cfg.behavior?.publicComment === false && (kind === 'comment' || kind === 'ta')) {
+    return {
+      ok: false, used: 0, cap: 0, reason: 'public-comment-disabled',
+      text: '✗ 现在不在别人的视频/评论区发言 —— 只发自己的动态；看到值得说的私信主人',
+    }
+  }
+  const L = freeLimits(cfg)
   const all = loadLog()
   const auto = all.filter(isAutoComment)
   const dynKind = kind.startsWith('mine:') ? kind.slice(5) : ''

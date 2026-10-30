@@ -100,6 +100,15 @@ const LOCAL_EXECUTION_TOOLS = [
   'read', 'read_image', 'write', 'edit', 'str_replace_editor',
   // 文件检索
   'glob', 'grep',
+  // 工作目录切换（本地文件系统入口，与 read/write 同属一类）
+  'working_directory',
+  // 视频分析（读本地视频 / 下载远端视频抽帧 + ASR）
+  // 归属：这几个是给「看视频」的会话用的，QQ 群既拿不到本地视频文件，
+  // 贴链接解析的成本（每张分镜约 384 token + ASR 秒级）也不适合群聊节奏。
+  // 之前它们不在 SAFE_PREFIXES 白名单里、执行期已被拒，但仍留在 schema 里
+  // 白占约 4.3k token/请求 —— 这里补上，才能真正从工具清单里消失。
+  // 注意：B 站侧的看片会话走别的 preset，不受本文件影响。
+  'video_probe', 'video_storyboard', 'video_zoom', 'video_locate',
   // 自带运行时（Python/Node/pnpm 的绝对路径）⇒ 等于把"跑代码"递给模型
   'load_workspace_dependencies',
   // 派生 agent 与编排（都能间接拿到 shell）

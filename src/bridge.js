@@ -63,6 +63,12 @@ import {
   blockMessage, evaluateBudget, localDayKey, readBudget, readDailyUsage,
 } from './token-budget.js';
 import { createBiliMemory } from './bili-memory.js';
+import { createSlangExtractor } from './slang-extractor.js';
+import { createExtractorModelClient, resolveExtractorConfig } from './extractor-model.js';
+import { createEmbedder } from './memory-embed.js';
+import { createMemoryStore } from './memory-store.js';
+import { createBM25Store } from './memory-bm25.js';
+import { createShadowRetriever } from './memory-shadow.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
@@ -582,6 +588,20 @@ function isSendToolName(name) {
 const SPACE_SPLIT_HINT = '想分多条消息时用空格分隔；不想分条就不要加空格，用标点连接。注意：中英文/数字之间的空格也会被当作分条信号。';
 // 群聊指向性提示：引用/回复段表示“这句话是在对被引用的人说”，避免 AI 把群友之间的对话误当成指向自己。
 const DIRECTION_HINT = '注意：消息里的 [引用 某人：...] 表示这句话是在回应被引用的人；引用的是你的消息才是在找你，引用别人时别默认是在找你。';
+// 每条消息都带发送时刻：没有它时，模型分不清"刚说的"和"几小时前说的"，
+// 半夜被定时器叫醒后会去接一句早就凉了的话。
+function formatMsgTime(input) {
+  const raw = Number(input);
+  const ts = Number.isFinite(raw) && raw > 0 ? (raw < 1e12 ? raw * 1000 : raw) : Date.now();
+  const d = new Date(ts);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+    return `${hh}:${mm}`;
+  }
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hh}:${mm}`;
+}
 
 // 已知的二代 agent token 集合：日志/活动/出站文本统一脱敏，防止令牌被模型泄露到 QQ。
 const KNOWN_AGENT_TOKENS = new Set();
@@ -1382,6 +1402,13 @@ function acquireLock() {
     console.error(`[bridge] 检测到过期锁文件（PID 不存在或为空），删除后重试…`);
     try { fs.unlinkSync(LOCK_FILE); } catch {}
     if (tryCreate()) return;
+    // A hardened state/ ACL can make the stale lock undeletable for the current
+    // token. Leaving that to exit(2) bricks the bridge forever even though the
+    // console port is free, so fall through once the port check confirms it.
+    if (!consolePortInUse()) {
+      console.error(`[bridge] 锁文件残留但控制台端口空闲，按残留锁继续启动（${LOCK_FILE}）`);
+      return;
+    }
   }
   console.error(`[bridge] 已有实例在运行（锁文件 ${LOCK_FILE}）。若确认其已死，删除该文件后重试。`);
   process.exit(2);
@@ -2596,6 +2623,183 @@ async function main() {
     return slangTaskChain;
   }
 
+  // ── 黑话候选发现器（旁路 extractor，2026-10-30）──────────────────────────
+  // 和旧的 slang-learner 完全隔离：不开持久会话、不 replay 历史、不联网研究。
+  // 每次只读 social-v2 里 cursor 之后的新消息，直连 OpenAI 兼容端点做一次无状态抽取。
+  // 生产默认 slangMode=off，这条链路是死的；改成 extractor 才跑。
+  let slangExtractor = null;
+  let slangExtractorBroken = '';
+
+  /** off | legacy | extractor。没写 mode 时按旧开关推导，保证老配置行为不变。 */
+  function slangModeNow() {
+    const mode = String(cfg.slang?.mode || '').trim();
+    if (mode === 'extractor' || mode === 'legacy' || mode === 'off') return mode;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return 'off';
+    return 'legacy';
+  }
+
+  /** extractor 的用量也写进同一份 token-usage.jsonl，口径和宿主一致。 */
+  function recordExtractorUsage(usage) {
+    try {
+      fs.appendFileSync(TOKEN_USAGE_FILE, JSON.stringify({
+        k: 'turn',
+        t: Date.now(),
+        sid: 'slang-extractor',
+        key: 'internal:黑话提取',
+        seq: 0,
+        turn: 0,
+        step: 1,
+        retry: 0,
+        model: usage.model,
+        provider: usage.provider,
+        b: {
+          cacheMiss: Number(usage.cacheMiss) || 0,
+          cacheHit: Number(usage.cacheHit) || 0,
+          cacheWrite: 0,
+          output: Number(usage.outputTokens) || 0,
+          reasoning: 0,
+        },
+      }) + '\n');
+    } catch { /* 记账失败不影响提取 */ }
+  }
+
+  function ensureSlangExtractor() {
+    if (slangExtractor) return slangExtractor;
+    if (slangExtractorBroken) return null;
+    const exCfg = resolveExtractorConfig(cfg.slang?.extractor);
+    if (!exCfg.ready) {
+      slangExtractorBroken = exCfg.why;
+      log('[黑话提取] 未启用：' + exCfg.why);
+      return null;
+    }
+    let askModel = null;
+    try {
+      askModel = createExtractorModelClient({ config: exCfg, log, onUsage: recordExtractorUsage });
+    } catch (error) {
+      slangExtractorBroken = String(error?.message ?? error);
+      log('[黑话提取] 模型客户端不可用：' + slangExtractorBroken);
+      return null;
+    }
+    const exOpts = cfg.slang?.extractor || {};
+    slangExtractor = createSlangExtractor({
+      stateDir: STATE_DIR,
+      log,
+      loadMessages: (key) => {
+        const st = getSocialV2State(key);
+        return { messages: Array.isArray(st.recentMessages) ? st.recentMessages : [] };
+      },
+      askModel,
+      onCandidate: ({ term, guess, evidence }) => {
+        const patch = { countIncrement: 1, source: 'extractor' };
+        if (guess) patch.meaning = guess;
+        if (Array.isArray(evidence) && evidence.length) patch.evidence = evidence.map((text) => ({ text }));
+        upsertSlangEntry(slangEntries, term, patch);
+        saveSlangStore();
+      },
+      minMessages: Number(exOpts.minMessages) > 0 ? Number(exOpts.minMessages) : 6,
+      maxBatch: Number(exOpts.maxBatch) > 0 ? Number(exOpts.maxBatch) : 60,
+      cooldownMs: Number(exOpts.cooldownMs) >= 0 ? Number(exOpts.cooldownMs) : 300000,
+    });
+    log('[黑话提取] 已就绪（' + exCfg.provider + ' · ' + exCfg.model + '）');
+    return slangExtractor;
+  }
+
+  /** 收到消息后试着跑一次；不阻塞消息处理，失败由 extractor 自己维护 cursor。 */
+  function maybeRunSlangExtractor(key) {
+    if (slangModeNow() !== 'extractor') return;
+    const ex = ensureSlangExtractor();
+    if (!ex) return;
+    void ex.runOnce(key).catch((error) => log('[黑话提取] 运行失败：' + String(error?.message ?? error)));
+  }
+
+  // ── 长期记忆（2026-10-30 第一阶段：归档 + shadow 检索）──────────────────
+  // 这一层现在**只写不读**：群消息进 message-archive.jsonl，每轮唤醒做一次检索，
+  // 结果只进 memory-shadow.jsonl 供离线分析，**绝不拼进 prompt**。
+  // vectorMemory.enabled 是未来"真正注入"的开关，现在默认 false，改了也不会注入
+  // （注入代码还没写，这是有意的）。
+  let memoryStore = null;
+  let memoryShadow = null;
+  const vmCfg = () => (cfg.vectorMemory && typeof cfg.vectorMemory === 'object' ? cfg.vectorMemory : {});
+  function memoryEnabled() {
+    const c = vmCfg();
+    return c.enabled === true || c.shadow === true;
+  }
+  function ensureMemory() {
+    if (memoryStore) return memoryStore;
+    if (!memoryEnabled()) return null;
+    try {
+      const c = vmCfg();
+      const archiveFile = path.join(STATE_DIR, c.archiveFile || 'message-archive.jsonl');
+      // 2026-10-30：retriever 可选 bm25 / hash。
+      // bm25 是默认 —— 零依赖，且 IDF 能压住"[图片]"这类高频串（哈希向量会给出 0.88）。
+      const retriever = String(c.retriever || 'bm25').trim();
+      let how = '';
+      if (retriever === 'bm25') {
+        memoryStore = createBM25Store({ file: archiveFile, log });
+        how = 'retriever=bm25';
+      } else {
+        const embedder = createEmbedder({ provider: c.embedProvider || 'hash' });
+        memoryStore = createMemoryStore({ file: archiveFile, embedder, log });
+        how = 'retriever=' + embedder.provider + ' dim=' + embedder.dim;
+      }
+      const loaded = memoryStore.load();
+      log('[记忆] 已加载 ' + loaded.loaded + ' 条归档（' + how + '）');
+      if (c.shadow === true) {
+        memoryShadow = createShadowRetriever({
+          store: memoryStore,
+          file: path.join(STATE_DIR, c.shadowFile || 'memory-shadow.jsonl'),
+          log,
+          topK: Number(c.topK) > 0 ? Number(c.topK) : 8,
+        });
+      }
+    } catch (error) {
+      log('[记忆] 初始化失败（不影响主流程）：' + String(error?.message ?? error));
+      memoryStore = null;
+      memoryShadow = null;
+    }
+    return memoryStore;
+  }
+
+  /** 把一条群消息写进长期记忆。幂等靠 store 内部的 key+seq。 */
+  function archiveMemory(key, msg) {
+    const store = ensureMemory();
+    if (!store || !msg) return;
+    const text = String(msg.plain ?? msg.text ?? '').trim();
+    if (!text) return;                      // 纯图片/表情没有可检索的文本
+    // 2026-10-30：这些进了索引只会污染检索结果 ——
+    // 实测主群 100 条里有 9 条是 "[图片]"，它们在哈希向量下互相匹配能到 0.88。
+    if (/^\[(图片|表情|转发消息|拍一拍|视频|语音|文件|动画表情)\]$/.test(text)) return;
+    if (/^@\S+\s*$/.test(text)) return;    // 纯 @ 某人
+    if (text.length <= 1) return;           // 单字感叹
+    try {
+      store.add({
+        key,
+        seq: msg.seq,
+        messageId: msg.messageId,
+        sender: msg.sender,
+        userId: msg.userId,
+        time: msg.time,
+        replyTo: msg.quoteTargetIsSelf ? 'self' : '',
+        type: 'message',
+        text,
+      });
+    } catch (error) {
+      log('[记忆] 归档失败：' + String(error?.message ?? error));
+    }
+  }
+
+  /** 每轮唤醒做一次 shadow 检索：只记录，不注入。 */
+  function probeMemoryShadow(key, query, sender) {
+    if (!memoryShadow) return;
+    const text = String(query ?? '').trim();
+    if (!text) return;
+    try {
+      memoryShadow.probe({ key, query: text, sender });
+    } catch (error) {
+      log('[记忆] shadow 失败：' + String(error?.message ?? error));
+    }
+  }
+
   async function ensureSlangLearnerSession() {
     const preset = resolvePresetName(cfg.slang?.learnerPreset || cfg.agentPreset, { strict: true });
     if (!preset) throw new Error('黑话学习缺少已验证的安全 preset，拒绝创建或复用会话');
@@ -2672,7 +2876,7 @@ async function main() {
   }
 
   async function runSlangExtraction(key) {
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     if (learnerBudgetBlock()) return;
     const messages = slangWindows.get(key) ?? [];
@@ -2740,7 +2944,7 @@ async function main() {
 
   async function runSlangResearch(candidates) {
     if (!candidates || !candidates.length) return;
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     if (learnerBudgetBlock()) return;
     // 过滤掉已经在研究队列里的候选，避免同一批被重复排队研究。
@@ -2794,7 +2998,7 @@ async function main() {
   }
 
   function maybeQueueSlangExtraction(key) {
-    if (cfg.slang?.enabled === false) return;
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
     const cooldown = Number(cfg.slang?.extractCooldownMs ?? 300000);
     const last = slangExtractionCooldowns.get(key) ?? 0;
@@ -2809,7 +3013,10 @@ async function main() {
   // 黑话学习素材入口：群聊普通消息进入滚动窗口（命令/角色控制语不学；
   // 只学当前消息自己的文字，不学引用原文）。一代/二代共用。
   function feedSlangWindow(key, sender, plainContent) {
-    if (cfg.slang?.enabled === false) return;
+    // extractor 模式不在这里采集：它自己从 social-v2 的 recentMessages 按 cursor 读，
+    // 这里只负责"有消息进来了"这件事，触发一次去抖后的 runOnce。
+    if (slangModeNow() === 'extractor') { maybeRunSlangExtractor(key); return; }
+    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!key || !plainContent || typeof plainContent !== 'string') return;
     const text = plainContent.trim();
     if (!text || text.startsWith('/')) return;
@@ -2870,7 +3077,15 @@ async function main() {
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
     const parts = [timeLine];
     if (cfg.slang?.enabled !== false) {
-      const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
+      // 2026-10-30：从"每轮固定注入 top N"改成"按需注入"。
+      // 理由：固定注入是每轮 338 token（8 条），词典涨到 30 条就是 3000 token/轮，
+      // 而且这部分拼在 user message 里全是 miss（¥1/M，是 hit 的 50 倍）。
+      // 按需模式下只把"本轮消息里真的出现过"的词条交给 buildSlangContext，
+      // 命中率低但零浪费；词典再大也不会推高每轮成本。
+      const text = String(promptText || '');
+      const relevant = slangEntries.filter((e) => e && e.status === SLANG_STATUS.CONFIRMED
+        && e.content && e.meaning && text.includes(String(e.content)));
+      const block = relevant.length ? buildSlangContext(relevant, cfg.slang?.injectMax ?? 8) : '';
       if (block) parts.push(block);
     }
     return parts.join('\n\n') + '\n\n' + promptText;
@@ -3388,6 +3603,7 @@ async function main() {
     log(`会话权限已变化，停用旧映射 ${key} -> ${sessionId}`);
   }
 
+  const pausedSessions = new Set();
   function reconcileSessionPolicies() {
     // DSH preset 清单未知时**绝不能**做退役判定。
     //
@@ -3400,7 +3616,26 @@ async function main() {
     // 一次网络抖动换来全体失忆，代价完全不成比例。清单为空时宁可不判定，等下一轮。
     if (dshPresetIds.length === 0) return;
     for (const [key, sessionId] of Object.entries(state.sessions)) {
-      if (!isCurrentSession(key, sessionId)) retireSession(key);
+      if (isCurrentSession(key, sessionId)) continue;
+      // A conversation dropped from the whitelist keeps its mapping: the policy only
+      // covers mode/preset/owner, so re-adding the group resumes the same DSH session
+      // instead of paying for a full context loss on every whitelist edit.
+      let sameModePreset = false;
+      try {
+        const prev = JSON.parse(String(state.sessionPolicies[key] ?? ''));
+        const next = JSON.parse(sessionPolicy(key));
+        sameModePreset = Array.isArray(prev) && Array.isArray(next)
+          && prev[0] === next[0] && prev[1] === next[1];
+      } catch {}
+      if (sameModePreset) {
+        if (!pausedSessions.has(key)) {
+          pausedSessions.add(key);
+          log(`会话 ${key} 因白名单变化暂停投递（保留上下文，重新加入后自动恢复）`);
+        }
+        continue;
+      }
+      pausedSessions.delete(key);
+      retireSession(key);
     }
   }
 
@@ -5596,7 +5831,7 @@ async function main() {
           const readThroughSeq = req.headers['x-agent-token'] ? noteModelMessagesV2(st, messages) : readThroughSeqV2(st);
           // 翻未读是最常见的新消息入口，同样带上表情推荐
           const stickerMatch = stickerMatchFor(messages);
-          sendJson({ ok: true, key, unreadCount: st.unread.length, ...(stickerMatch ? { stickerMatch } : {}), messages, readThroughSeq });
+          sendJson({ ok: true, key, unreadCount: st.unread.length, ...(stickerMatch ? { stickerMatch } : {}), messages: messages.map((m) => ({ ...m, at: formatMsgTime(m.time) })), readThroughSeq });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/recent') {
@@ -5612,7 +5847,7 @@ async function main() {
           const end = Math.max(0, st.recentMessages.length - offset);
           const messages = st.recentMessages.slice(start, end);
           const readThroughSeq = req.headers['x-agent-token'] ? noteModelMessagesV2(st, messages) : readThroughSeqV2(st);
-          sendJson({ ok: true, key, messages, readThroughSeq });
+          sendJson({ ok: true, key, messages: messages.map((m) => ({ ...m, at: formatMsgTime(m.time) })), readThroughSeq });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/mark-read') {
@@ -9162,7 +9397,10 @@ async function main() {
       }
     }
     const message = String(lastError?.message ?? lastError ?? '');
-    if (/not[- ]?found/i.test(message)) {
+    // "blocked" is what DSH returns for an archived session: the resume never runs,
+    // so the turn ends with kind=blocked and the bridge retries forever. Treat every
+    // "this session is not usable any more" shape as terminal so the caller retires it.
+    if (/not[- ]?found|blocked|archiv|resume failed|session\s*\/\s*model-unavailable/i.test(message)) {
       // 终态失败：记下 epoch，避免退役前（或退役失败时）被反复重试刷屏。
       modelAppliedSessions.set(sessionId, modelSelectionEpoch);
       return 'not-found';
@@ -10547,7 +10785,7 @@ async function main() {
   // 活跃阶段：只贴"没给过 AI 的新消息"（上下文在会话历史里，不重复贴，不贴人格）
   // allowSilent=false 表示这条必须回（被 @/点名/私聊等），不提供 [SILENT] 出口。
   function buildBatchPrompt(key, newMsgs, allowSilent = true) {
-    const lines = newMsgs.map((m) => `${m.isOwner ? ownerMessageTag() : ''}${m.sender}：${m.text}${mediaHintFor(key, m.messageId, m.media)}`).join('\n');
+    const lines = newMsgs.map((m) => `${m.isOwner ? ownerMessageTag() : ''}[${formatMsgTime(m.time)}] ${m.sender}：${m.text}${mediaHintFor(key, m.messageId, m.media)}`).join('\n');
     const directionHint = lines.includes('[引用') ? `${DIRECTION_HINT}\n` : '';
     if (!allowSilent) {
       return `【新消息】\n${lines}\n\n${directionHint}请回复消息。\n${SPACE_SPLIT_HINT}`;
@@ -11253,6 +11491,9 @@ async function main() {
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+    // 长期记忆 shadow：每轮唤醒检索一次，只记日志、不注入（2026-10-30）。
+    // 放在这里而不是每个请求里 —— 一次 wake 才算"一轮"，和我们要分析的粒度一致。
+    probeMemoryShadow(key, promptText);
     // Recheck queued wakes at dispatch time: no model call while paused/disabled
     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
     const wakeBlocked = () => opts.wakeReason && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false);
@@ -12214,6 +12455,7 @@ async function main() {
     st.preSleepWaitObservedAt = 0;
     st.preSleepWaitAccumMs = 0;
     st.recentMessages.push(msg);
+    archiveMemory(key, msg);
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
@@ -13249,11 +13491,13 @@ async function main() {
       if (candidate.isSelf) {
         // 自己以前发的消息只进 recent 帮助理解上下文，不进未读（不需要“处理”）。
         st.recentMessages.push(msg);
+        archiveMemory(key, msg);
         continue;
       }
       msg.seq = (st.lastUnreadSeq || 0) + 1;
       st.lastUnreadSeq = msg.seq;
       st.recentMessages.push(msg);
+      archiveMemory(key, msg);
       st.unread.push(msg);
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
@@ -13895,7 +14139,7 @@ async function main() {
       : '';
     const promptText = recentBlock + (roleHint ? roleHint + '\n\n' : '') + (biliRecall ? biliRecall + '\n\n' : '') + chimeInHint
       + (isOwner ? ownerMessageTag() : '')
-      + senderLabel + '：' + textContent
+      + '[' + formatMsgTime(event?.time) + '] ' + senderLabel + '：' + textContent
       + mediaHintFor(key, messageRef, mediaList);
 
     appendActivity(`${key} ${isOwner ? '管理员' : '群友'} ${event.sender?.nickname || event.user_id}：${textContent.slice(0, 80)}`);
@@ -14987,8 +15231,13 @@ async function main() {
   const biliGroupList = (list) => (Array.isArray(list) ? list : [])
     .map((v) => String(v).trim())
     .filter((v) => /^\d+$/.test(v));
+  // 分享目标额外接受 private:<uin>（2026-10-30：主人要"别进群，私发给我"）。
+  // 动态同步仍然只认群号 —— 那条链路的作用就是"把她的公开动态播报到群里"。
+  const biliShareTargetList = (list) => (Array.isArray(list) ? list : [])
+    .map((v) => String(v).trim())
+    .filter((v) => /^\d+$/.test(v) || /^private:\d+$/.test(v));
   if (cfg.biliBridge?.enabled) {
-    const shareGroups = biliGroupList(cfg.biliBridge.share.groups.length ? cfg.biliBridge.share.groups : cfg.allow.groups);
+    const shareGroups = biliShareTargetList(cfg.biliBridge.share.groups.length ? cfg.biliBridge.share.groups : cfg.allow.groups);
     const dynamicsGroups = biliGroupList(cfg.biliBridge.dynamics.groups.length ? cfg.biliBridge.dynamics.groups : cfg.allow.groups);
     if (cfg.biliBridge.memory.enabled) {
       void biliMemory.refresh({ force: true });

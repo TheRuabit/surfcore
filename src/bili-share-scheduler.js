@@ -36,7 +36,9 @@ function nextOccurrence(now, times) {
   return d;
 }
 
-export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = false } = {}) {
+export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = false, isPrivate = false } = {}) {
+  // isPrivate：投递目标是私聊（private:<uin>）时，文案里不能说"发到群里"。
+  const audience = isPrivate ? '主人' : '群里';
   const title = String(card?.title ?? '').trim() || '一条B站视频';
   const url = String(card?.url ?? '').trim();
   const cleanBody = (s) => String(s ?? '')
@@ -51,12 +53,12 @@ export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = fa
   const body = cleanBody(card?.reason || card?.text || '');
   const quote = cleanBody(card?.quote || '');
   const lines = [];
-  lines.push(`【B站分享·定时任务】现在是 ${timeLabel}，请主动在群里分享一件你最近在B站碰到的有趣的事。`);
+  lines.push(`【B站分享·定时任务】现在是 ${timeLabel}，请主动${isPrivate ? '私信给主人' : '在群里'}分享一件你最近在B站碰到的有趣的事。`);
   if (cardSent) {
     // 默认发的是「【B站】标题 + 链接」文本（QQ 卡片走不通，见 PITFALLS #24）。
-    lines.push('分享内容（标题 + 链接）已经由系统发到群里了：这一轮你只需要补 2~3 句短评，不要再发链接、BV 号或复述完整标题。');
+    lines.push(`分享内容（标题 + 链接）已经由系统发到${audience}了：这一轮你只需要补 2~3 句短评，不要再发链接、BV 号或复述完整标题。`);
   }
-  lines.push('这一轮只做分享：不要回应群里的其他消息，不要把它当成谁在问你，也不要提“定时/任务/素材/记忆库”。');
+  lines.push(`这一轮只做分享：不要回应${audience}的其他消息，不要把它当成谁在问你，也不要提“定时/任务/素材/记忆库”。`);
   lines.push('');
   lines.push('素材（你真实看过/发过；细节以素材为准，不要编）：');
   lines.push(`- 标题/内容：${title}`);
@@ -65,7 +67,7 @@ export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = fa
   if (quote) lines.push(`- 你当时的公开评论：「${quote.slice(0, 160)}」`);
   lines.push('');
   lines.push('要求：');
-  lines.push('1. 用你自己的口吻（按角色卡），像群里随口分享，不要像新闻播报，也不要照抄素材原文。');
+  lines.push(`1. 用你自己的口吻（按角色卡），像${isPrivate ? '跟主人私聊时' : '群里随口'}分享，不要像新闻播报，也不要照抄素材原文。`);
   if (cardSent) {
     lines.push('2. 只写 2~3 句短评，合计 50~100 字；不要重复卡片上的标题，也不要再发链接/BV 号。');
   } else {
@@ -74,9 +76,9 @@ export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = fa
   lines.push('3. 不用 Markdown，不 @ 人；句子里的拼音字遵守角色卡（一句最多一个）。');
   lines.push('4. 不聊政治、时政、娱乐圈/明星八卦，只分享好玩的内容。');
   if (String(mode) === 'reserved2') {
-    lines.push('5. 你是二代仿真模式，文本不会自动发送：请调用 mcp__snowluma__qq_send_message 把这段内容发到当前群，messages 用字符串（一条即可），不要只输出文本。');
+    lines.push(`5. 你是二代仿真模式，文本不会自动发送：请调用 mcp__snowluma__qq_send_message 把这段内容发到当前${isPrivate ? '私聊' : '群'}，messages 用字符串（一条即可），不要只输出文本。`);
   } else {
-    lines.push('5. 只输出要发到群里的内容，不要输出 [SILENT]，不要解释，不要加引号。');
+    lines.push(`5. 只输出要发出去的内容，不要输出 [SILENT]，不要解释，不要加引号。`);
   }
   return lines.join('\n');
 }
@@ -171,7 +173,7 @@ export function createBiliShareScheduler({
       log('[B站分享] 上一轮还没跑完，跳过本次');
       return { ok: false, skipped: true };
     }
-    if (!groups.length) return { ok: false, why: '没有白名单群' };
+    if (!groups.length) return { ok: false, why: '没有投递目标（群或私聊）' };
     if (!memory) return { ok: false, why: '记忆模块未初始化' };
     const now = new Date();
     const dk = dateKey(now);
@@ -193,10 +195,14 @@ export function createBiliShareScheduler({
         return { ok: false, why: '没有新鲜素材' };
       }
       let sent = 0;
-      for (const gid of groups) {
-        const key = `group:${gid}`;
+      for (const raw of groups) {
+        // groups 里既可以是群号（824266596），也可以是 private:<uin>（私聊投递）。
+        // 私聊投递走的就是同一个 deliverPrompt —— 她的输出由桥接自动发到那个会话。
+        const key = String(raw ?? '').includes(':') ? String(raw).trim() : `group:${String(raw ?? '').trim()}`;
+        const isGroup = key.startsWith('group:');
         let cardSent = false;
-        if (sendCard) {
+        // 卡片只发群：私聊里没有"卡片"这回事，让她直接写标题 + 链接更自然。
+        if (sendCard && isGroup) {
           try {
             cardSent = (await sendCard(key, card)) === true;
             if (cardSent) log(`[B站分享] ${timeLabel} 已发分享 ${key}：${String(card.title).slice(0, 30)}`);
@@ -204,7 +210,7 @@ export function createBiliShareScheduler({
             log(`[B站分享] ${timeLabel} 分享发送失败 ${key}：${error?.message ?? error}`);
           }
         }
-        const prompt = buildSharePrompt(card, timeLabel, { mode: getMode(), cardSent });
+        const prompt = buildSharePrompt(card, timeLabel, { mode: getMode(), cardSent, isPrivate: !isGroup });
         let promptOk = false;
         try {
           await deliverPrompt(key, prompt);
