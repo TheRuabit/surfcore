@@ -73,6 +73,8 @@ const tests = [
   'test-admin-identity.mjs', 'test-admin-prompt-wiring.mjs',
   // 记忆卡：重要度评分 / 主人锚点 / 每日模糊与遗忘 / 80·90·100% 容量 / 提示词裁剪 / 隐私 scope。
   'test-memory-card.mjs', 'test-memory-card-wiring.mjs',
+  // 长期记忆：归档/检索/查询窗口/噪音过滤（BM25 与 hash 向量共用接口）。
+  'test-vector-memory.mjs', 'test-memory-bm25.mjs',
   // 角色人格：多角色目录隔离 / 切换 epoch / 快照回档 / 旧数据迁移（含凭证不进角色包）。
   'test-character-store.mjs',
   // B站 工具链路径：有角色时行为账本进角色包，cookie/表情包仍在账号目录。

@@ -134,6 +134,15 @@
     "workspaceTitle": "QQ 黑话学习",
     "autoResearch": true
   },
+  "vectorMemory": {
+    "enabled": false,
+    "shadow": false,
+    "retriever": "bm25",
+    "embedProvider": "hash",
+    "topK": 8,
+    "archiveFile": "message-archive.jsonl",
+    "shadowFile": "memory-shadow.jsonl"
+  },
   "social": {
     "enabled": true,
     "maxReplyChars": 500,

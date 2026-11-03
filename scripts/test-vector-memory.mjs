@@ -7,10 +7,10 @@ import { hashEmbed, cosine, createEmbedder, normalizeText, EMBED_DIM } from '../
 import { createMemoryStore } from '../src/memory-store.js';
 import { createShadowRetriever, estimateTokens } from '../src/memory-shadow.js';
 
-const tmp = (name) => {
-  const dir = fs.mkdtempSync(path.join(process.cwd(), '_tmp-mem-'));
-  return path.join(dir, name);
-};
+const tmpRoot = fs.mkdtempSync(path.join(process.cwd(), '_tmp-mem-'));
+process.on('exit', () => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* 退出清理失败不阻塞 */ } });
+let tmpSeq = 0;
+const tmp = (name) => path.join(tmpRoot, `${++tmpSeq}-${name}`);
 
 test('hashEmbed：归一化 + 同文本同向量', () => {
   const a = hashEmbed('葛叶开局合守');

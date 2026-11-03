@@ -229,7 +229,7 @@ test('没有匹配时返回空串（不占 token）', () => {
   assert.equal(buildStickerMatchHint([], {}), '');
 });
 
-test('高分推荐用强措辞，低分保留保守措辞（模型会自我审查）', () => {
+test('高分用强措辞，低分也明确「可以发」（2026-10-31 放松后不再劝退）', () => {
   const strong = buildStickerMatchHint([
     { no: 6, emotionLabel: '委屈', content: '哭着求你们别再嘲笑我的回复', score: 0.83 }
   ], {});
@@ -240,7 +240,13 @@ test('高分推荐用强措辞，低分保留保守措辞（模型会自我审�
   const weak = buildStickerMatchHint([
     { no: 5, emotionLabel: '委屈', content: '抱着空碗', score: 0.4 }
   ], {});
-  assert.ok(weak.includes('真的贴合才发一张'), weak);
+  // 旧版这里断言「真的贴合才发一张」，实测结果是 3 天只发 10 张（发言 390 次）。
+  // 改成明确允许发；但仍要求「情绪对得上」，避免完全无关的图。
+  assert.ok(!weak.includes('真的贴合才发一张'), '不能再用劝退话术');
+  assert.ok(weak.includes('想发也行'), '低分也要明确「可以发」');
+  assert.ok(!weak.includes('0.5 以上都可以用'), '低分分支不能援引高于自己的门槛（自相矛盾）');
+  assert.ok(weak.includes('沾边'), '低分仍要守住「至少沾边」');
+  assert.ok(!weak.includes('很贴合'), '低分不能说「很贴合」');
 });
 
 console.log('## 编号引用');

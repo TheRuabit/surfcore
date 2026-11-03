@@ -91,12 +91,13 @@ try {
 } catch (e) {
   console.log(`（找视频卡片失败：${String(e?.message ?? e).slice(0, 80)}）`)
 }
-if (!avDyn && !allowText) {
-  console.error('✗ 没找到这条视频的 AV 动态卡片 —— 换一条视频，或加 --allow-text 退回“文字 + 链接”')
-  process.exit(4)
+// Missing card is no longer fatal: fall back to text + link.
+// --allow-text stays accepted so existing callers keep working.
+if (!avDyn) {
+  console.log('（没找到这条视频的 AV 动态卡片，退回「文字 + 链接」）')
 }
 const finalText = avDyn ? text : `${text}\nhttps://www.bilibili.com/video/${bvid}/`
-const cardLabel = avDyn ? `视频卡片（转发动态 ${avDyn.id}）` : '文字 + 链接（--allow-text）'
+const cardLabel = avDyn ? `视频卡片（转发动态 ${avDyn.id}）` : '文字 + 链接'
 
 console.log(`[分享·动态] ${bvid}`)
 console.log(`  卡片：${cardLabel}`)

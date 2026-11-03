@@ -43,7 +43,7 @@ export const DEFAULTS = {
   limits: { ...DEFAULT_LIMITS },
   // 四类动态（2026-10-22 可编辑）：总开关、两条之间的最小间隔、每类的时段/长度/开头。
   //   kinds 里只存"被改过的字段"；缺省值在 tools/lib/kinds.mjs 的 DEFAULT_KINDS。
-  dynamics: { enabled: true, gapMin: 30, kinds: {} },
+  dynamics: { enabled: true, gapMin: 15, kinds: {} },
   // 2026-10-23 用户定：默认发自己的动态（视频卡片），不再默认评论区 @ 主人。
   share: { enabled: true, via: 'dynamic', minScore: 13, silentAfterDays: 3, decayPerDay: 1 },  // 分享型开关与评分阈值
   // 发言边界（2026-10-29 用户定）：false = **不在别人的视频/评论区主动说话**。

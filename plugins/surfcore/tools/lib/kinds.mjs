@@ -87,14 +87,14 @@ export function dynamicsEnabled(cfg) {
 
 export function dynamicsGapMin(cfg) {
   const src = cfg && typeof cfg === 'object' ? cfg : config()
-  return clampInt(src?.dynamics?.gapMin, 30, 5, 240)
+  return clampInt(src?.dynamics?.gapMin, 15, 5, 240)
 }
 
 /** 给 store/UI 用的完整可编辑默认值（只含可编辑字段，不带 n/label）。 */
 export function dynamicDefaults() {
   return {
     enabled: true,
-    gapMin: 30,
+    gapMin: 15,
     kinds: Object.fromEntries(Object.entries(DEFAULT_KINDS).map(([key, def]) => [key, {
       enabled: def.enabled !== false,
       slot: def.slot,
@@ -124,7 +124,7 @@ export function normalizeDynamics(input) {
   }
   return {
     enabled: src.enabled !== false,
-    gapMin: clampInt(src.gapMin, 30, 5, 240),
+    gapMin: clampInt(src.gapMin, 15, 5, 240),
     kinds,
   }
 }

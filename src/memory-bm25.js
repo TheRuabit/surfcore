@@ -16,7 +16,9 @@ const MAX_LOAD = 50_000;
 function tokenize(text) {
   const s = String(text == null ? '' : text)
     .replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
-    .toLowerCase();
+    .toLowerCase()
+    // @昵称 是称呼不是内容；不剥掉的话每条带同一个 @ 的消息都会互相命中。
+    .replace(/@\S+/g, ' ');
   const out = [];
   // 英文 / 数字 / 下划线：整词
   for (const m of s.matchAll(/[a-z0-9_]{2,}/g)) out.push(m[0]);
@@ -62,8 +64,9 @@ export function createBM25Store(options) {
 
   function index(doc) {
     doc.tf = new Map();
-    for (const t of tokenize(doc.text)) doc.tf.set(t, (doc.tf.get(t) || 0) + 1);
-    doc.len = doc.tf.size || 1;
+    const terms = tokenize(doc.text);
+    for (const t of terms) doc.tf.set(t, (doc.tf.get(t) || 0) + 1);
+    doc.len = terms.length || 1;
     for (const t of doc.tf.keys()) {
       let set = postings.get(t);
       if (!set) { set = new Set(); postings.set(t, set); }
@@ -137,7 +140,8 @@ export function createBM25Store(options) {
     const filter = o.filter && typeof o.filter === 'object' ? o.filter : {};
     const fKey = filter.key ? String(filter.key) : '';
     const fSince = Number(filter.since) > 0 ? Number(filter.since) : 0;
-    const fSender = filter.sender ? String(filter.sender) : '';
+    // 时间上界：检索「旧记忆」时排除 query 自己所在的窗口。
+    const fBefore = Number(filter.before) > 0 ? Number(filter.before) : 0;
 
     const qTerms = [...new Set(tokenize(q))];
     if (!qTerms.length) return { hits: [], scanned: 0 };
@@ -152,15 +156,18 @@ export function createBM25Store(options) {
       // BM25 的 idf；+1 避免负值
       const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
       if (idf <= 0) continue;
+      // 单字（什么/的/了）几乎每条都有，只做兜底；bigram 才是带信息的单位。
+      const termWeight = term.length === 1 ? 0.3 : 1;
       for (const docId of set) {
         const doc = docs.get(docId);
         if (!doc) continue;
         if (fKey && doc.key !== fKey) continue;
         if (fSince && doc.time < fSince) continue;
+        if (fBefore && doc.time >= fBefore) continue;
         const tf = doc.tf.get(term) || 0;
         if (!tf) continue;
         const denom = tf + K1 * (1 - B + B * (doc.len / avgdl));
-        const s = idf * (tf * (K1 + 1)) / denom;
+        const s = termWeight * idf * (tf * (K1 + 1)) / denom;
         scores.set(docId, (scores.get(docId) || 0) + s);
       }
     }
@@ -169,13 +176,12 @@ export function createBM25Store(options) {
     for (const [docId, raw] of scores) {
       const doc = docs.get(docId);
       if (!doc) continue;
-      // 归一化到 0~1 方便和向量分对比：tanh 压一下长文档的多词命中优势
-      const bm25 = Math.tanh(raw / 4);
+      // 归一化到 0~1：tanh 压一下长文档的多词命中优势。除数 8 是对短 query 的饱和修正。
+      const bm25 = Math.tanh(raw / 8);
       const ageHours = Math.max(0, (now - doc.time) / 3600000);
       const recency = Math.max(0, 1 - ageHours / 168);
-      const sameSpeaker = fSender && doc.sender === fSender ? 1 : 0;
-      const replyChain = fSender && doc.replyTo && doc.replyTo === fSender ? 1 : 0;
-      const score = bm25 * 0.6 + recency * 0.2 + sameSpeaker * 0.1 + replyChain * 0.1;
+      // query 是多条消息拼的，sender 没有唯一值；不再按说话人/引用链加权。
+      const score = bm25 * 0.75 + recency * 0.25;
       hits.push({ score, bm25, recency, item: doc });
     }
     hits.sort((a, b) => b.score - a.score);

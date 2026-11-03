@@ -155,6 +155,15 @@ const LIMITS = {
   gaming: { days: 14, play: 5000, likeRate: 0.025 },
 }
 
+async function tagsOf(bvid) {
+  // Tags are the most reliable category hint: an AMV titled only with the show
+  // name still gets 原神/无职转生 tags. Failure is non-fatal (empty string).
+  try {
+    const j = await (await fetch('https://api.bilibili.com/x/tag/archive/tags?bvid=' + bvid, { headers: UA })).json()
+    return (j?.data ?? []).map((x) => String(x?.tag_name ?? '')).filter(Boolean).join(' ')
+  } catch { return '' }
+}
+
 async function viewOf(bvid) {
   try {
     const j = await (await fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid, { headers: UA })).json()
@@ -164,6 +173,7 @@ async function viewOf(bvid) {
       title: String(d.title ?? ''), desc: String(d.desc ?? ''), pic: String(d.pic ?? ''),
       pubdate: Number(d.pubdate ?? 0), dur: Number(d.duration ?? 0), tname: String(d.tname ?? ''),
       play: Number(d.stat?.view ?? 0), like: Number(d.stat?.like ?? 0), danmaku: Number(d.stat?.danmaku ?? 0), fav: Number(d.stat?.favorite ?? 0),
+      tags: await tagsOf(bvid),
     }
   } catch { return null }
 }
@@ -197,7 +207,7 @@ if (KIND === 'best') {
   }
   const v = await viewOf(bv)
   if (!v) { console.error(`✗ 拿不到 ${bv} 的信息（视频不存在 / 被删 / 接口抽风）`); process.exit(5) }
-  const text = `${v.title} ${v.desc} ${v.tname}`
+  const text = `${v.title} ${v.desc} ${v.tname} ${v.tags ?? ''}`
   const days = Math.floor((Date.now() / 1000 - v.pubdate) / 86400)
   const likeRate = v.play ? v.like / v.play : 0
   const L = LIMITS[KIND]

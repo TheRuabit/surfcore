@@ -124,8 +124,7 @@ export function createMemoryStore(options) {
 
   /**
    * 检索。返回按混合分排序的前 topK 条。
-   * 混合分 = 余弦 0.6 + 新鲜度 0.2 + 同说话人 0.1 + 回复链 0.1
-   * （权重先按经验定，shadow 阶段会记录每条的分项，便于以后调）
+   * 混合分 = 余弦 0.75 + 新鲜度 0.25（filter 支持 key / since / before）。
    * @param {string} query
    * @param {{filter?:object, topK?:number, now?:number}} [opts]
    */
@@ -140,21 +139,21 @@ export function createMemoryStore(options) {
     const filter = o.filter && typeof o.filter === 'object' ? o.filter : {};
     const fKey = filter.key ? String(filter.key) : '';
     const fSince = Number(filter.since) > 0 ? Number(filter.since) : 0;
-    const fSender = filter.sender ? String(filter.sender) : '';
+    const fBefore = Number(filter.before) > 0 ? Number(filter.before) : 0;
     const hits = [];
     let scanned = 0;
     for (const item of byId.values()) {
       if (fKey && item.key !== fKey) continue;
       if (fSince && item.time < fSince) continue;
+      if (fBefore && item.time >= fBefore) continue;
       scanned += 1;
       let dot = 0;
       const v = item.v;
       for (let i = 0; i < v.length; i += 1) dot += qv[i] * v[i];
       const ageHours = Math.max(0, (now - item.time) / 3600000);
       const recency = Math.max(0, 1 - ageHours / 168);           // 7 天内线性衰减
-      const sameSpeaker = fSender && item.sender === fSender ? 1 : 0;
-      const replyChain = fSender && item.replyTo && item.replyTo === fSender ? 1 : 0;
-      const score = dot * 0.6 + recency * 0.2 + sameSpeaker * 0.1 + replyChain * 0.1;
+      // query 是多条消息拼的，sender 没有唯一值；语义 0.75 + 时间 0.25。
+      const score = dot * 0.75 + recency * 0.25;
       hits.push({ score, dot, recency, item });
     }
     hits.sort((a, b) => b.score - a.score);

@@ -309,15 +309,21 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
 
     const dynamics = await ensureDynamics({ force });
     const dynamicItems = (Array.isArray(dynamics.items) ? dynamics.items : [])
-      .map((it) => ({
+      .map((it) => {
+        const text = redactOwner(cleanText(it?.text ?? ''));
+        // 上游抓动态时不解析 bvid，正文里的视频链接就成了唯一来源。
+        // 不在这里补，后面 buildBrief 永远拿不到 BV（2026-10-30）。
+        const bvid = String(it?.bvid ?? '').trim() || (text.match(BV_RE)?.[0] ?? '');
+        return {
         id: String(it?.id ?? ''),
-        text: redactOwner(cleanText(it?.text ?? '')),
+        text,
         title: redactOwner(cleanText(it?.title ?? '')),
-        bvid: String(it?.bvid ?? '').trim(),
-        url: String(it?.url ?? ''),
+        bvid,
+        url: String(it?.url ?? '') || (bvid ? `https://www.bilibili.com/video/${bvid}/` : ''),
         date: localDate(Number(it?.pubTs) ? Number(it.pubTs) * 1000 : dynamics.at),
         at: Number(it?.pubTs) ? new Date(Number(it.pubTs) * 1000).toISOString() : new Date(Number(dynamics.at) || Date.now()).toISOString(),
-      }))
+        };
+      })
       .filter((it) => it.text.length >= 10 || it.title);
 
     const blocks = parseDiaryBlocks(diaryRaw, fallbackDate);
@@ -572,14 +578,16 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
       if (key && seen.has(key)) continue;
       if (key) seen.add(key);
       picks.push(e);
-      if (picks.length >= 10) break;
+      if (picks.length >= 6) break;
     }
     for (const e of picks) {
       const label = e.type === 'dynamic' ? '动态' : e.score ? `${e.score}分` : e.favorite ? '收藏' : '看过';
+      // 链接是这条记忆能被引用的前提（QQ 那边要发给她自己的视频时靠它）。
+      const link = e.bvid ? `https://www.bilibili.com/video/${e.bvid}/` : String(e.url || '');
       const body = e.type === 'dynamic'
-        ? short(e.text, 110)
-        : short(e.quote || e.reason || e.anecdote || '', 100);
-      lines.push(`- ${e.date}【${label}】${short(e.title, 46)}${body ? `：${body}` : ''}`);
+        ? short(e.text, 60)
+        : short(e.quote || e.reason || e.anecdote || '', 60);
+      lines.push(`- ${e.date}【${label}】${short(e.title, 46)}${body ? `：${body}` : ''}${link ? ` ${link}` : ''}`);
     }
     lines.push('');
     lines.push('我的习惯：看到认真做但没人看的小 UP 会去留一句；评论常用「mer」收尾；喜欢短、可爱、荒诞、有梗的东西，不爱长篇干货和带货。');

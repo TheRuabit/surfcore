@@ -44,7 +44,7 @@ export function createShadowRetriever(options) {
 
   /**
    * 跑一次 shadow 检索并记录。
-   * @param {{key:string, query:string, sender?:string, now?:number}} input
+   * @param {{key:string, query:string, before?:number, now?:number}} input
    * @returns {{skipped?:string, candidates:number, topK:number, tokens:number[], scores:number[], latencyMs:number}}
    */
   function probe(input) {
@@ -59,7 +59,7 @@ export function createShadowRetriever(options) {
       result = store.search(query, {
         topK,
         now: p.now,
-        filter: { key: p.key, sender: p.sender },
+        filter: { key: p.key, before: p.before },
       });
     } catch (error) {
       log('[记忆] shadow 检索失败：' + String((error && error.message) || error));
@@ -85,7 +85,7 @@ export function createShadowRetriever(options) {
     totalLatency += latencyMs;
     lastResult = {
       key: String(p.key || ''),
-      query: query.slice(0, 120),
+      query: query.slice(0, 400),   // 120 太短，日志里看不出检索的是什么
       candidates: hits.length,
       scanned: result.scanned || 0,
       scores,

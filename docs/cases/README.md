@@ -6,6 +6,10 @@
 
 | 日期 | 案例 | 一句话 | 版本 |
 | --- | --- | --- | --- |
+| 2026-10-31 | [长期记忆检索没生效：query 读错表 + 自匹配](2026-10-31-vector-memory-retrieval.md) | reserved2 读 v1 Map 恒空、before 挡不住自匹配、归档正则失效 → 改用 v2 窗口 + 以最早消息为上界 + 补测 | 待发布 |
+| 2026-10-31 | [长中文回答导致 tool JSON 崩塌](2026-10-31-tool-json-malformed.md) | 模型把 messages 值裸写进 JSON，整轮 MALFORMED_RESPONSE | v0.7.17 |
+| 2026-10-30 | [记忆交换断裂：QQ 与 B站 互相读不到](2026-10-30-memory-exchange-gaps.md) | B站 见闻没进 memory-card + qqToBili 默认关 + brief 截断丢 BV | v0.7.17 |
+| 2026-10-30 | [B站 四类动态三个闸门太紧](2026-10-30-bili-dynamics-gates.md) | 判据不看 tags、30 分钟全局间隔、缺卡片直接拒 → 判据加 tags、间隔 15、卡片缺失退文字 | 待发布 |
 | 2026-10-29 | [设置称呼「弥叭」仍叫管理员](2026-10-29-admin-display-name-projection.md) | QQ 投影只写 ownerQQ，桥接兜底把「管理员」当称呼 → 完整投影 + 空串兜底 | 待发布 |
 | 2026-10-29 | [原生浏览选中文目录后导入报不存在](2026-10-29-browse-chinese-path.md) | PowerShell stdout GBK 被 Node 当 UTF-8 → 路径乱码；改 UTF-8 临时文件 | 待发布 |
 | 2026-10-29 | [云端参考音频“下载”没反应](2026-10-29-cloud-sample-download.md) | 接口 200 但 `<a target=_blank>` 被宿主拦 → fetch+Blob，加「打开所在目录」 | 待发布 |

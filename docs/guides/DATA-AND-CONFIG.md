@@ -34,7 +34,7 @@
 
 ## 1. `config.json`（QQ 桥接）
 
-> 模板：`config.example.json`（410 行）。**模板不是纯文档**：插件的 `readQqConfig()` 会把它当默认层
+> 模板：`config.example.json`（约 420 行）。**模板不是纯文档**：插件的 `readQqConfig()` 会把它当默认层
 > deepMerge（`plugins/surfcore/lib/store.js:272-280`），所以模板里没有的键 = 插件视图中没有默认值。
 
 ### 1.1 DSH 连接与会话
@@ -174,7 +174,26 @@
   ⚠️ 新版本还有 `carrier`（qq/pet）、`petModality`、`petFallbackToQQ`，**模板里没有**。
 - `greetings.morning`：`time`（08:00）、`uin`、`name`；默认整体关。
 
-### 1.13 ⚠️ 模板缺的四段
+### 1.13 长期记忆（`vectorMemory`）
+
+第一阶段只做「归档 + shadow 检索」：消息按 `key + seq` 幂等写入 `state/message-archive.jsonl`；
+每轮唤醒用最近 3 条群友消息检索一次，结果只写 `state/memory-shadow.jsonl`，**不进 prompt**。
+`enabled` 与 `shadow` 任一为 true 就会建索引；只开 `enabled` 只归档、不检索。
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `enabled` | `false` | 归档开关（建索引 + 写 `archiveFile`） |
+| `shadow` | `false` | shadow 检索开关；打开后每轮 `probe` 并写 `shadowFile`（`enabled=false` 也生效） |
+| `retriever` | `bm25` | `bm25` 或 `hash`（本地哈希向量）；两者接口一致，都支持 `filter.key/since/before` |
+| `embedProvider` | `hash` | 仅 `retriever=hash` 时使用 |
+| `topK` | `8` | 每次 shadow 取前几条（1–20 截断） |
+| `archiveFile` / `shadowFile` | `message-archive.jsonl` / `memory-shadow.jsonl` | 相对 `state/` |
+
+改完需重启桥接；`probeMemoryShadow` 的查询窗口取当前会话最近 3 条非自己、非拍一拍、
+非纯媒体/纯 @ 的消息，时间上界取「窗口内最早一条」与「now - 10 分钟」中更早者
+（窗口和当前话题都不会被检索回来）。
+
+### 1.14 ⚠️ 模板缺的四段
 
 `config.example.json` **没有** `chat`、`platforms.start`、`pet`、`tokenBudget` 四段。
 功能不受影响（代码各处有 `??` 兜底），但这意味着"模板即默认层"这一层缺键，新装用户从模板看不到这些能力。

@@ -73,6 +73,7 @@ import { createEmbedder } from './memory-embed.js';
 import { createMemoryStore } from './memory-store.js';
 import { createBM25Store } from './memory-bm25.js';
 import { createShadowRetriever } from './memory-shadow.js';
+import { isMemoryNoiseText, pickShadowQuery } from './memory-query.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
@@ -838,6 +839,10 @@ function loadConfig() {
       autoResearch: true,
       ...(file.slang ?? {})
     },
+    // 长期记忆：loadConfig 是白名单式重建，新增字段必须在这里挂上（PITFALLS #12）。
+    vectorMemory: (file.vectorMemory && typeof file.vectorMemory === 'object' && !Array.isArray(file.vectorMemory))
+      ? file.vectorMemory
+      : {},
     social: {
       enabled: true,
       // 启动阶段（观望）
@@ -2782,20 +2787,22 @@ async function main() {
     const store = ensureMemory();
     if (!store || !msg) return;
     const text = String(msg.plain ?? msg.text ?? '').trim();
-    if (!text) return;
-    if (/^\\[(图片|表情|转发消息|拍一拍|视频|语音|文件|动画表情)\\]$/.test(text)) return;
-    if (/^@\\S+\\s*$/.test(text)) return;
-    if (text.length <= 1) return;
+    if (isMemoryNoiseText(text)) return;
     try {
       store.add({ key, seq: msg.seq, messageId: msg.messageId, sender: msg.sender, userId: msg.userId, time: msg.time, replyTo: msg.quoteTargetIsSelf ? 'self' : '', type: 'message', text });
     } catch (error) { log('[记忆] 归档失败：' + String(error?.message ?? error)); }
   }
 
-  function probeMemoryShadow(key, query, sender) {
+  function probeMemoryShadow(key) {
     if (!memoryShadow) return;
-    const text = String(query ?? '').trim();
-    if (!text) return;
-    try { memoryShadow.probe({ key, query: text, sender }); }
+    // reserved2 的消息在 socialV2 会话状态里；social.recentMessages 只有一代 reserved 写。
+    const v2 = socialV2.conversations.get(canonicalV2Key(key) || key);
+    const source = (v2 && Array.isArray(v2.recentMessages) && v2.recentMessages.length)
+      ? v2.recentMessages
+      : (social.recentMessages.get(key) ?? []);
+    const { text, before } = pickShadowQuery(source);
+    if (!text || !before) return;
+    try { memoryShadow.probe({ key, query: text, before }); }
     catch (error) { log('[记忆] shadow 失败：' + String(error?.message ?? error)); }
   }
 
@@ -10447,7 +10454,7 @@ async function main() {
     if (directUnread > 0) {
       hint = '有人直接找你，优先回应；其余热闹可以挑着参与。';
     } else if (recentAi2m >= 2) {
-      hint = '你刚刚已经连回过好几次了，这轮可以少说，但别直接消失；有值得接的仍要自然接一句。';
+      hint = '你刚刚已经连回过好几次了。';
     } else if (lastAiGap < 120000) {
       hint = '你刚说过话，先听一会儿；有能接住的话再自然接，不用硬等点名。';
     } else if (aiCount >= 5) {
@@ -11566,7 +11573,7 @@ async function main() {
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
     // 长期记忆 shadow：每轮唤醒检索一次，只记日志、不注入（2026-10-30）
-    probeMemoryShadow(key, promptText);
+    probeMemoryShadow(key);
     // Recheck queued wakes at dispatch time: no model call while paused/disabled
     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
     const wakeBlocked = () => opts.wakeReason && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false);
@@ -12969,7 +12976,13 @@ async function main() {
       ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-    const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。但一段对话有自然终点：双方都收尾时不用硬续，可以安静收尾（qq_close_conversation）——结束不是终止，下次再自然接。\n\n';
+    // 2026-11-02 用户反馈"话变多了"：原来的【积极性】把"主动参与"写成了默认动作，
+  // 人格卡说"说几句话会累"却管不住。这里改成"默认观众"：只在被点到、
+  // 或手里真有别人说不出的话时才开口；一轮上限 1~2 条。
+  // 2026-11-02：整段停用。这里原来写【积极性】"不要习惯性潜水、能接就接"，
+  // 我一度改成"这一轮最多 1~2 条"——那只是把一个约束换成另一个约束。
+  // 用户定的是：规则层不给节奏指令，让角色卡（病弱、说几句话会累）自己起作用。
+  const proactiveLine = '';
     // 对话收尾判断：把「我最后一句 / 对方最后一句 / 我还有没有想说的 / 对方还想不想聊」
     // 变成每次醒来都能看到的参数。只给建议，收不收由她决定。
     const closureText = closurePromptLineV2(key, st);
