@@ -86,6 +86,7 @@
 | `qq_mark_read` | 标记已读到某个水位（推荐总带 `throughSeq`，否则会清空全部未读） | `markRead` |
 | `qq_close_conversation` | **自然收尾**：不发消息，记录"收在哪/下次怎么接"，保持唤醒配置 | `closeConversation` |
 | `qq_set_wake_config` | 设置唤醒条件（@/名字/关键词/提问/拍一拍/概率/任意消息/指定成员）与潜水时长 | `setWakeConfig` |
+| `qq_set_reminder` | 一次性定时提醒：`wake=false` 到点直接发 `text`；`wake=true` 到点唤醒模型并附 `text`。独立于 `sleepUntil` 和沉睡前观察，不会被其他唤醒取消 | `setReminder` |
 
 > **沉睡前观察**是硬约束：决定潜水/收尾前必须先用 `qq_wait_for_messages(timeoutMs=300000)` 完成一次
 > 静默观察，桥接会校验；`purpose="reply"` 的短静默**不能**代替它。

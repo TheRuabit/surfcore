@@ -131,7 +131,7 @@
 | 子段 | 关键键 | 作用 |
 | --- | --- | --- |
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
-| `tools` | 31 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
+| `tools` | 32 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/定时提醒/表情/语音/记忆/黑话/收尾…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
 | `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*` | 唤醒调度与"沉睡前观察"的强制窗口 |
 | `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars` | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压 |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
@@ -145,6 +145,8 @@
 | `history` | `enabled`、`limit`、`maxAgeMinutes`、`wake`、`includePrivate` | 上线补历史 |
 | `initialPromptMaxChars` | `2000` | 每会话首次唤醒的"环境说明"上限 |
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
+
+> `qq_set_reminder` 是独立于 `wake` 的一次性定时提醒：`wake=false` 到点直接发 `text`，`wake=true` 到点唤醒模型并附 `text`；任务存 `state/reminders.json`，重启后补发（30 分钟宽限），不受沉睡前观察和 `sleepUntil` 影响。开关 `tools.setReminder`（默认 true）。
 
 #### 1.11.1 语音（`socialV2.voice`）
 

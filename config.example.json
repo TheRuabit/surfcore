@@ -201,6 +201,7 @@
       "getMessageDetail": true,
       "getActiveMembers": true,
       "setWakeConfig": true,
+      "setReminder": true,
       "markRead": true,
       "closeConversation": true,
       "memory": true,

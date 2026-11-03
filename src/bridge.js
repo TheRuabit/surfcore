@@ -74,6 +74,7 @@ import { createMemoryStore } from './memory-store.js';
 import { createBM25Store } from './memory-bm25.js';
 import { createShadowRetriever } from './memory-shadow.js';
 import { isMemoryNoiseText, pickShadowQuery } from './memory-query.js';
+import { createReminderScheduler } from './reminder-scheduler.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
@@ -903,6 +904,7 @@ function loadConfig() {
         getMessageDetail: true,
         getActiveMembers: true,
         setWakeConfig: true,
+        setReminder: true,
         markRead: true,
         memory: true,
         getImages: true,
@@ -1049,6 +1051,7 @@ function loadConfig() {
     getMessageDetail: true,
     getActiveMembers: true,
     setWakeConfig: true,
+    setReminder: true,
     markRead: true,
     memory: true,
     slangQuery: true,
@@ -5719,6 +5722,7 @@ async function main() {
             getMessageDetail: 'qq_get_message_detail',
             getActiveMembers: 'qq_get_active_members',
             setWakeConfig: 'qq_set_wake_config',
+            setReminder: 'qq_set_reminder',
             markRead: 'qq_mark_read',
             closeConversation: 'qq_close_conversation',
             memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
@@ -6046,6 +6050,29 @@ async function main() {
           setupSleepTimerV2(key);
           log(`[reserved2] 更新唤醒配置 ${key}: mode=${next.mode} infinite=${next.infinite} sleepUntil=${next.sleepUntil ?? 'null'}`);
           sendJson({ ok: true, key, markedCount, unreadCount: st.unread.length, readThroughSeq: readThroughSeqV2(st), wakeConfig: next, wakeSafety: computeWakeSafetyV2(next) });
+          return;
+        }
+        // 定时提醒：独立于 wakeConfig 和沉睡前观察；到点直接发文本或唤醒模型。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/reminder') {
+          const body = await readBody();
+          let key = String(body.key ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          const canonicalKey = canonicalV2Key(key);
+          if (!canonicalKey) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          key = canonicalKey;
+          if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!v2ToolEnabled('setReminder')) { sendJson({ ok: false, error: '工具未启用：qq_set_reminder' }, 403); return; }
+          const cancelId = String(body.cancelId ?? '').trim();
+          if (cancelId) {
+            const canceled = reminderScheduler.cancel(cancelId);
+            sendJson(canceled.ok ? { ok: true, canceled: canceled.canceled } : { ok: false, error: canceled.error }, canceled.ok ? 200 : 404);
+            return;
+          }
+          const result = reminderScheduler.set({ key, at: body.at, text: body.text, wake: body.wake === true });
+          if (!result.ok) { sendJson({ ok: false, error: result.error }, 400); return; }
+          log(`[提醒] 已设置 ${result.reminder.id}（${key}，${result.reminder.at}，wake=${result.reminder.wake}）`);
+          sendJson({ ok: true, reminder: result.reminder });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/states') {
@@ -8633,6 +8660,36 @@ async function main() {
     return sendChain;
   }
 
+  async function wakeForReminder(key, text, reminder) {
+    // 暂停/非 reserved2：提醒不该丢，退化成直接发文本（仍走 sendToQQ 的模式与白名单闸门）。
+    if (socialV2.paused || currentMode !== 'reserved2') {
+      await sendToQQ(key, text);
+      return lastSendSucceeded(key);
+    }
+    const st = getSocialV2State(key);
+    st.reminderWake = { text, at: reminder?.at || '', lateMs: Number(reminder?.lateMs) || 0 };
+    saveSocialV2State();
+    const result = await sendWakePromptV2(key, 'reminder');
+    // 被鱼群/额度/模式挡住：直接发文本兜底，避免“提醒静默消失”。
+    if (result && result.ok === false && !result.queued && result.skipped !== 'rate') {
+      st.reminderWake = null;
+      saveSocialV2State();
+      if (text) await sendToQQ(key, text);
+      return lastSendSucceeded(key);
+    }
+    return true;
+  }
+
+  const reminderScheduler = createReminderScheduler({
+    file: path.join(STATE_DIR, 'reminders.json'),
+    log,
+    sendText: async (key, text) => {
+      await sendToQQ(key, text);
+      return lastSendSucceeded(key);
+    },
+    wake: async (key, text, reminder) => wakeForReminder(key, text, reminder)
+  });
+
   /** 上一批发往该会话的消息是否全部成功。 */
   function lastSendSucceeded(key) {
     return lastSendFailed.get(key) !== true;
@@ -9827,6 +9884,7 @@ async function main() {
         preSleepWaitSatisfiedAt: 0,
         preSleepWaitObservedAt: 0,
         preSleepWaitAccumMs: 0,
+        reminderWake: null,
         lastUnreadSeq: 0,
         lastReadThroughSeq: 0,
         modelSeenSeqs: new Set(),
@@ -9903,6 +9961,13 @@ async function main() {
             preSleepWaitSatisfiedAt: Number(val.preSleepWaitSatisfiedAt) || 0,
             preSleepWaitObservedAt: Number(val.preSleepWaitObservedAt) || 0,
             preSleepWaitAccumMs: Number(val.preSleepWaitAccumMs) || 0,
+            reminderWake: (val.reminderWake && typeof val.reminderWake === 'object' && val.reminderWake.text)
+              ? {
+                  text: String(val.reminderWake.text).slice(0, 1000),
+                  at: String(val.reminderWake.at || ''),
+                  lateMs: Number(val.reminderWake.lateMs) || 0
+                }
+              : null,
             lastUnreadSeq: Number(val.lastUnreadSeq) || 0,
             lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
               ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
@@ -10021,6 +10086,7 @@ async function main() {
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
+          reminderWake: st.reminderWake && typeof st.reminderWake === 'object' ? st.reminderWake : null,
           lastUnreadSeq: st.lastUnreadSeq || 0,
           lastReadThroughSeq: st.lastReadThroughSeq || 0,
           activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
@@ -11662,6 +11728,13 @@ async function main() {
       social.exitingSessions.delete(sessionId);
     }
     // sessionId 给「目的机制」收回合回执用；其它调用方只读 ok，加字段不改变语义。
+    if (opts.wakeReason === 'reminder') {
+      const stRem = socialV2.conversations.get(canonicalV2Key(key));
+      if (stRem && stRem.reminderWake) {
+        stRem.reminderWake = null;
+        saveSocialV2State();
+      }
+    }
     return { ok: true, sessionId };
   }
 
@@ -13038,6 +13111,12 @@ async function main() {
     const memoryCardText = memoryCardPromptBlock();
     const memoryCardLine = memoryCardText ? `${memoryCardText}\n\n` : '';
     const base = roleLine + identityLine + provenanceLine + adminLine + biliLine + memoryCardLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    if (reason === 'reminder') {
+      const r = st.reminderWake;
+      const when = r?.at ? new Date(r.at).toLocaleString('zh-CN', { hour12: false }) : '';
+      const late = Number(r?.lateMs) >= 60000 ? '（补发）' : '';
+      return `${base}【定时提醒】${key}\n${late}原定：${when}\n提醒内容：${String(r?.text || '（无内容）').slice(0, 500)}\n这是你自己之前设的提醒，不是新消息。按提醒内容决定：直接发消息/做事；不需要说话就安静收尾。`;
+    }
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -13070,11 +13149,11 @@ async function main() {
   }
 
   async function sendWakePromptV2(key, reason) {
-    if (cfg.socialV2?.enabled === false) return;
-    if (currentMode !== 'reserved2' || socialV2.paused) return;
+    if (cfg.socialV2?.enabled === false) return { ok: false, skipped: 'not-ready' };
+    if (currentMode !== 'reserved2' || socialV2.paused) return { ok: false, skipped: 'not-ready' };
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
-      return;
+      return { ok: false, skipped: 'not-ready' };
     }
     const st = getSocialV2State(key);
     // 鱼群保护：定时器/主动机会在保护期内不唤醒；只有人类 @/名字/提问/拍一拍且已记录 bypass 才放行。
@@ -13087,7 +13166,7 @@ async function main() {
     });
     if (fishWake.blocked) {
       log(`[鱼群保护] 跳过唤醒 ${key}（${reason}）：${fishGuardReasonText(fishWake) || '保护冷却中'}`);
-      return;
+      return { ok: false, skipped: 'fish' };
     }
     // Token 防爆破：鱼群守则之后、真正投递之前。被拦时消息保留在未读，不烧模型回合。
     const directWake = isDirectFishGuardWake(reason) || fishGuardDirectUnread(st) || fishGuardOwnerUnread(st) || Boolean(bypass);
@@ -13103,7 +13182,7 @@ async function main() {
         }, waitMs);
         st.tokenRetryTimer.unref?.();
       }
-      return;
+      return { ok: false, skipped: 'token' };
     }
     // 防重入：如果该会话已经有一个 DSH turn 在进行中（AI 正在思考/调用工具），
     // 或已有排队/在途 prompt，则不再投递新的候选唤醒，避免“思维链进行中又塞入一个 question 唤醒”。
@@ -13116,7 +13195,7 @@ async function main() {
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
       log(`[reserved2] 会话繁忙，暂存唤醒原因 ${key}（${reason}@seq${seq}，原因=${busyReasonV2(key, st)}）`);
-      return;
+      return { ok: false, skipped: 'busy', queued: true };
     }
     // 唤醒频率硬限制：超限则**延后重试**，不能直接丢弃。直接 return 的后果：
     //   · timeout 唤醒时 setupSleepTimerV2 已经清空 sleepTimer，丢弃后这个会话会停在
@@ -13158,7 +13237,7 @@ async function main() {
         st.rateLimitRetryTimer.unref?.();
       }
       log(`[reserved2] 唤醒频率超限，${Math.round(waitMs / 1000)}s 后重试 ${key}（${reason}）`);
-      return;
+      return { ok: false, skipped: 'rate', queued: true };
     }
     // Only a real new wake resets observation; skipped/busy candidates must
     // preserve the current turn's progress through its required wait window.
@@ -13212,6 +13291,12 @@ async function main() {
         // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
         log(`[reserved2] 唤醒已入队 ${key}（${reason}），等待 DSH 恢复后补投`);
       }
+      if (result && result.skipped === true) return { ok: false, skipped: 'not-ready' };
+      if (reason === 'reminder' && result && result.ok !== false && result.queued !== true && result.retried !== true) {
+        st.reminderWake = null;
+        saveSocialV2State();
+      }
+      return result || { ok: true };
     } catch (error) {
       pendingWakeKeys.delete(key);
       disarmPendingWakeLease(key);
@@ -13223,6 +13308,7 @@ async function main() {
         setupSleepTimerV2(key);
       }
       log(`[reserved2] 唤醒投递失败 ${key}: ${error?.message ?? error}`);
+      return { ok: false, error: String(error?.message ?? error) };
     }
   }
 
@@ -13321,7 +13407,7 @@ async function main() {
   // 与「未读消息」无关的唤醒原因（定时器/引导/上线补历史）。这些原因在会话繁忙时被暂存后，
   // 不能用「unread 里还有没有对应 seq」来判断是否还要补发 —— 那一轮很可能已经把
   // 未读全部标读了，结果就是 timeout 定时器被静默丢掉、会话停在无定时器的静默态。
-  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'bootstrap', 'admin', 'history']);
+  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'bootstrap', 'admin', 'history', 'reminder']);
   function isTimerWakeReason(reason) {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }
@@ -13387,6 +13473,13 @@ async function main() {
     if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return null;
     const item = st.pendingWakeReasons.shift();
     if (!item || typeof item !== 'object') return null;
+    if (item.reason === 'reminder') {
+      log(`[reserved2] ${key} 补发繁忙期间到点的定时提醒`);
+      const pending = st.reminderWake || {};
+      void wakeForReminder(key, pending.text || '', { at: pending.at, lateMs: pending.lateMs })
+        .catch((error) => log(`[reserved2] 补发提醒异常 ${key}: ${error?.message ?? error}`));
+      return { reason: 'reminder', action: 'replayed' };
+    }
     if (isTimerWakeReason(item.reason)) {
       if (item.reason === 'timeout') {
         log(`[reserved2] ${key} 补收繁忙期间到期的潜水定时器`);
@@ -15354,6 +15447,8 @@ async function main() {
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
+  // 等 bot 初始化完成后再装载提醒，避免过期补发时访问尚未初始化的 SnowLuma 客户端。
+  reminderScheduler.load();
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

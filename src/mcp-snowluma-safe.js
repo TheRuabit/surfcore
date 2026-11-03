@@ -670,6 +670,27 @@ server.tool(
 );
 
 server.tool(
+  'qq_set_reminder',
+  '设置/取消一次性定时提醒。wake=false（默认）到点由桥接直接发送 text，适合“九点半叫我”这种单纯叫人；wake=true 到点唤醒你并附 text，由你决定说什么/做什么，适合需要看消息、查记忆或带上下文的情况。at 用 ISO 8601（含时区）。它不要求沉睡前观察，也不受当前对话是否活跃影响；设置后可以继续聊天，不要用 qq_wait_for_messages 硬等。传 cancelId 则只取消，不新建。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    at: z.string().optional().describe('提醒时间，ISO 8601（如 2026-11-03T21:30:00+08:00）；取消时可不传'),
+    text: z.string().max(500).optional().describe('提醒内容；wake=false 时到点直接发这句，wake=true 时作为唤醒你的提醒语'),
+    wake: z.boolean().optional().describe('false=到点直接发 text（默认）；true=到点唤醒模型处理'),
+    cancelId: z.string().optional().describe('要取消的 reminder id；传了就只取消')
+  },
+  async ({ key, token, at, text, wake, cancelId }) => {
+    try {
+      const data = await agentApi('/api/socialV2/reminder', { method: 'POST', body: JSON.stringify({ key, at, text, wake, cancelId }), headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `设置提醒失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
   'qq_send_message',
   '统一发送工具：可发一条或多条，可引用某条消息，可自定义/按字数计算条间时间差。二代仿真模式专用。注意：字符串=一条消息，数组=多条消息；每个字符串内部不要用空格分隔中文短句，需要多条请用数组元素；每条消息要读起来完整，不要把同一句话拆到两条里。一次最多 8 条（数组按条数算，桥接硬拦）；内容太长先总结/挑重点，不要拆成 10 条刷屏。只有以下情况才需要传 replyToMessageId 引用：① 你这条消息指向的人或消息并非最新一条别人的消息（也就是你在回更早的某条）；② 你连续几句话里不同消息指代的是不同的消息或不同的人。其他情况（上下文唯一、刚在接同一条最新消息）不要引用，别让对方猜，也别为了用工具而用。',
   {
