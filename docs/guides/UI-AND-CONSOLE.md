@@ -437,6 +437,7 @@
 | `MemoryTab` | 记忆页外壳 + 双向同步 | `memory`（`client.js:3111`） |
 | `AlignTab` | 身份对齐 | `align`（`client.js:3223`） |
 | `ExtensionsTab` | 扩展管理 | `extensions`（`client.js:3356`） |
+| `CommandTerminalTab` | 命令插件 + Log Terminal（失败只日志，不回 QQ） | `commands`（`client.js`） |
 | `AdvancedTab` | 全部参数树 | `advanced`（`client.js:3420`） |
 | `DiagnosticsTab` | 诊断/备份/日志 | `diag`（`client.js:3461`） |
 | `CharactersTab` | 角色包管理 + 人格卡 | `characters`（`client.js:3550`） |

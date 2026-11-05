@@ -148,6 +148,11 @@ assert.ok(pluginIndexSource.includes('petChat.emit({'), '设置页测试消息�
 assert.ok(pluginIndexSource.includes('createPetChatService') && pluginIndexSource.includes('createPetPurposeService'), '插件没有装配桌宠对话 / 目的服务');
 assert.ok(pluginIndexSource.includes("suffix === '/focus'") && pluginIndexSource.includes('petChat.setFocus'), '插件缺少专注模式接口');
 const bridgeSource = fs.readFileSync(path.join(import.meta.dirname, '..', '..', '..', 'src', 'bridge.js'), 'utf8');
+assert.ok(source.includes('function CommandTerminalTab'), '缺少 Log Terminal 页');
+assert.ok(source.includes('["commands", "Log Terminal"]'), 'Log Terminal tab 没有注册');
+assert.ok(source.includes('/commands/plugins') && source.includes('/commands/log'), 'Log Terminal 没有调用命令接口');
+assert.ok(pluginIndexSource.includes('handleCommands'), '插件缺少 /commands 代理');
+assert.ok(bridgeSource.includes('/api/commands/plugins') && bridgeSource.includes('/api/commands/log'), '桥接缺少 commands 接口');
 assert.ok(bridgeSource.includes('petFocusEnabled') && bridgeSource.includes('PET_FOCUS_FILE'), '桥接没有读桌宠专注模式（QQ 载体也要停）');
 // 旧桥接代理动作保留（控制台/旧链接仍可用）。
 for (const action of ['purpose-status', 'purpose-preview', 'purpose-run']) {

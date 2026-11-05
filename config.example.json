@@ -180,6 +180,10 @@
     "longGapMinMs": 5000,
     "longGapMaxMs": 10000
   },
+  "commands": {
+    "ratePerMinute": 30,
+    "logMaxEntries": 2000
+  },
   "socialV2": {
     "enabled": true,
     "autoReplyCheckMs": 30000,

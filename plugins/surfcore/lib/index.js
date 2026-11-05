@@ -1257,6 +1257,55 @@ export function apply(ctx) {
     json(res, 400, { ok: false, error: '未知 action' });
   }
 
+  // ── 命令插件 / Log Terminal ─────────────────────────────────────────────
+  async function handleCommands(req, res, url) {
+    const suffix = url.pathname.slice(`${API_PREFIX}/commands`.length) || '/plugins';
+    const fail = (error, hint = '确认桥接控制台在运行、consoleToken 一致') => json(res, 502, {
+      ok: false, code: 'bridge-unavailable', error: String(error ?? '桥接不可用'), hint,
+    });
+    try {
+      if (req.method === 'GET' && suffix === '/plugins') {
+        const result = await callBridge('/api/commands/plugins');
+        if (!result.ok) { fail(result.error || result.data?.error || `HTTP ${result.status}`); return; }
+        json(res, 200, result.data);
+        return;
+      }
+      if (req.method === 'POST' && suffix === '/plugins') {
+        const body = JSON.parse(await readBody(req) || '{}');
+        const result = await callBridge('/api/commands/plugins', { method: 'POST', body });
+        if (!result.ok) {
+          const data = result.data && typeof result.data === 'object' ? result.data : {};
+          json(res, result.status || 502, {
+            ok: false,
+            code: data.code || 'bridge-unavailable',
+            error: data.error || result.error || `HTTP ${result.status}`,
+            hint: data.hint || '刷新插件列表后重试；或看 bridge.log',
+          });
+          return;
+        }
+        json(res, 200, result.data);
+        return;
+      }
+      if (req.method === 'GET' && suffix === '/log') {
+        const query = new URLSearchParams(url.searchParams);
+        if (!query.get('limit')) query.set('limit', '200');
+        const result = await callBridge(`/api/commands/log?${query.toString()}`);
+        if (!result.ok) { fail(result.error || result.data?.error || `HTTP ${result.status}`); return; }
+        json(res, 200, result.data);
+        return;
+      }
+      if (req.method === 'POST' && suffix === '/log/clear') {
+        const result = await callBridge('/api/commands/log/clear', { method: 'POST', body: {} });
+        if (!result.ok) { fail(result.error || result.data?.error || `HTTP ${result.status}`); return; }
+        json(res, 200, result.data);
+        return;
+      }
+      json(res, 404, { ok: false, code: 'unknown-command-api', error: `未知命令接口：${suffix}`, hint: '可用：/plugins、/log、/log/clear' });
+    } catch (error) {
+      json(res, 500, { ok: false, code: 'command-api-error', error: String(error?.message ?? error), hint: '检查插件日志与桥接控制台' });
+    }
+  }
+
   // ── 诊断 / 备份 ─────────────────────────────────────────────────────────
   // ── 新手体检（只读）＋ 一键配置（只写"缺失项"，绝不覆盖已有值）────────────
   // 目标：新人装完点一下就知道"还差什么、在哪补"，不用去翻文档。
@@ -2864,6 +2913,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     if (pathname === `${API_PREFIX}/align`) { await handleAlign(req, res); return; }
     if (pathname === `${API_PREFIX}/mode`) { await handleMode(req, res); return; }
     if (pathname === `${API_PREFIX}/extensions`) { await handleExtensions(req, res); return; }
+    if (pathname === `${API_PREFIX}/commands` || pathname.startsWith(`${API_PREFIX}/commands/`)) { await handleCommands(req, res, url); return; }
     if (pathname === `${API_PREFIX}/platforms`) { await handlePlatforms(req, res); return; }
     if (pathname === `${API_PREFIX}/diagnostics`) { await handleDiagnostics(req, res); return; }
     if (pathname === `${API_PREFIX}/bridge`) { await handleBridge(req, res); return; }

@@ -95,6 +95,7 @@
 | 键 | 默认 | 作用 |
 | --- | --- | --- |
 | `consolePort` | `3100` | 控制台端口（`stop-qq-bot.ps1` 也读它） |
+| `commands` | `ratePerMinute=30`、`logMaxEntries=2000` | 桥接命令插件：每用户/命令每分钟限流、Log Terminal 条数上限（超限轮转到 `command-log.jsonl.1`） |
 | `consoleToken` | 空 | 控制台令牌；空 = 自动生成到 `state/console-token` 并在日志打印前 6 位 |
 | `ackMessage` | 空 | 收到消息时的回执文本（空 = 不回执） |
 | `sendDelayMs` | `300` | 连续发送的基础间隔 |
@@ -272,6 +273,8 @@
 | `bridge.log` / `.log.1` | 桥接 | 控制台 | 运行日志（滚一代）；`qq-activity.log` 是"说了什么"的活动日志（500 行） |
 | `slang.json` / `stickers.json` | 桥接 | 桥接/控制台 | 黑话库、表情库（含语义标注） |
 | `tool-calls.jsonl` | 桥接 | 控制台 | 工具调用审计（按时间追加） |
+| `command-log.jsonl` / `.1` | 桥接 | 控制台 | 命令插件与 `/` 失败记录（Log Terminal；2000 条/1MB 轮转） |
+| `command-plugins.json` | 桥接 | 控制台 | 命令插件启用状态与配置（默认全关） |
 | `token-usage.jsonl` | 桥接 | 控制台 | 逐轮 token 用量明细（看板数据源） |
 | `greetings.json` | 桥接 | 桥接 | 早安问候状态（今天发没发、重试次数） |
 | `self-identity.json` | 桥接 | 插件/桌宠 | 跨平台自我识别（QQ 资料卡、B站 mid、主页） |

@@ -140,6 +140,13 @@ window.__ModuleLoader__.load({
 .qbw-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;background:rgba(127,127,127,.10);border-radius:4px;padding:1px 5px}
 .qbw-scroll{max-height:260px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 10px;background:rgba(127,127,127,.03)}
 .qbw-scroll pre{margin:0;white-space:pre-wrap;font-size:11.5px;line-height:17px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.qbw-terminal{max-height:340px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:6px 8px;background:rgba(20,20,24,.35);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:17px}
+.qbw-logline{display:grid;grid-template-columns:58px 120px 1fr;gap:6px;padding:2px 0;border-bottom:1px solid rgba(127,127,127,.08)}
+.qbw-logline:last-child{border-bottom:none}
+.qbw-logline .meta{color:var(--dsw-alias-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qbw-logline .body{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qbw-logline .bad{color:var(--dsw-alias-state-error-primary)}
+.qbw-logline .warn{color:#d69e2e}
 .qbw-meter{height:9px;border-radius:999px;background:rgba(127,127,127,.18);overflow:hidden;margin:8px 0 6px}
 .qbw-meter>i{display:block;height:100%;border-radius:inherit;background:#2fbf71;transition:width .3s ease}
 .qbw-meter.warn>i{background:#ffb020}
@@ -4328,6 +4335,112 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         err ? h("div", { className: "qbw-err" }, err) : null);
     }
 
+    // ── Log Terminal / 命令插件 ──────────────────────────────────────────────
+    function CommandTerminalTab({ busy, setBusy, toast }) {
+      const [data, setData] = useState(null);
+      const [logs, setLogs] = useState(null);
+      const [err, setErr] = useState("");
+      const [outcome, setOutcome] = useState("");
+      const [query, setQuery] = useState("");
+      const [auto, setAuto] = useState(true);
+      const [configs, setConfigs] = useState({});
+      const load = useCallback(async () => {
+        try {
+          const qs = new URLSearchParams({ limit: "200" });
+          if (outcome) qs.set("outcome", outcome);
+          if (query.trim()) qs.set("q", query.trim());
+          const [pluginData, logData] = await Promise.all([
+            api("/commands/plugins"),
+            api(`/commands/log?${qs.toString()}`),
+          ]);
+          setData(pluginData);
+          setLogs(logData);
+          const next = {};
+          for (const ext of pluginData.plugins ?? []) next[ext.id] = JSON.stringify(ext.config ?? {}, null, 2);
+          setConfigs((prev) => ({ ...next, ...prev }));
+          setErr("");
+        } catch (e) { setErr(e.message); }
+      }, [outcome, query]);
+      useEffect(() => { load(); }, [load]);
+      useEffect(() => {
+        if (!auto) return undefined;
+        const timer = setInterval(load, 2500);
+        return () => clearInterval(timer);
+      }, [auto, load]);
+      const toggle = async (id, enabled) => {
+        setBusy("cmd-" + id);
+        try {
+          await api("/commands/plugins", { method: "POST", body: { action: "toggle", id, enabled } });
+          toast(enabled ? "✓ 插件已启用" : "✓ 插件已停用");
+          await load();
+        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+      };
+      const reloadPlugin = async (id) => {
+        setBusy("cmd-reload-" + id);
+        try {
+          await api("/commands/plugins", { method: "POST", body: { action: "reload", id } });
+          toast("✓ 插件已重载");
+          await load();
+        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+      };
+      const saveConfig = async (id) => {
+        setBusy("cmd-cfg-" + id);
+        try {
+          const parsed = JSON.parse(configs[id] || "{}");
+          await api("/commands/plugins", { method: "POST", body: { action: "config", id, config: parsed } });
+          toast("✓ 插件配置已保存");
+          await load();
+        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+      };
+      const clearLog = async () => {
+        setBusy("cmd-clear");
+        try { await api("/commands/log/clear", { method: "POST", body: {} }); toast("✓ 日志已备份并清空"); await load(); }
+        catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+      };
+      const entries = logs?.entries ?? [];
+      return h("div", null,
+        h("div", { className: "qbw-infobox" },
+          "命令插件在 QQ 桥接进程里执行，不经过 DSH，不花模型 token。",
+          "失败（权限/未知/禁用/异常/限流）只记录在这里，不自动回 QQ；插件成功才回复。"),
+        err ? h("div", { className: "qbw-err" }, err) : null,
+        h("div", { className: "qbw-group" }, "命令插件 ", h("small", null, data?.dirs?.join(" · ") ?? "")),
+        (data?.errors ?? []).length ? h("div", { className: "qbw-err" }, data.errors.map((item) => `${item.id}: ${item.error}`).join("；")) : null,
+        (data?.plugins ?? []).length === 0 ? h("div", { className: "qbw-hint" }, "（没有命令插件）") : (data?.plugins ?? []).map((ext) => h("div", { className: "qbw-card", key: ext.id, style: { marginBottom: "8px" } },
+          h("h4", null, ext.name,
+            h("span", { className: "qbw-badge " + (ext.loaded ? "ok" : ext.error ? "warn" : "") }, ext.loaded ? "运行中" : ext.enabled ? "已启用" : "关闭")),
+          h("p", null, ext.description || "（无描述）"),
+          h("div", { className: "qbw-hint" }, `${ext.id} · v${ext.version} · ${ext.source} · ${ext.author || "local"} · 命令：${(ext.commands ?? []).map((c) => "/" + c.name).join(" ") || "—"}`),
+          ext.error ? h("div", { className: "qbw-err" }, ext.error) : null,
+          h("div", { className: "qbw-actions" },
+            h(Btn, { kind: ext.enabled ? "qbw-btn2" : "", onClick: () => toggle(ext.id, !ext.enabled), disabled: !!busy }, ext.enabled ? "停用" : "启用"),
+            h(Btn, { kind: "qbw-btn2", onClick: () => reloadPlugin(ext.id), disabled: !!busy || !ext.enabled }, "重载")),
+          h(Section, { title: "配置 JSON（高级）", note: "保存后插件下次读取生效；不确定的字段先备份" },
+            h("textarea", { className: "qbw-textarea", value: configs[ext.id] ?? "{}", onChange: (e) => setConfigs((s) => ({ ...s, [ext.id]: e.target.value })), placeholder: "插件配置 JSON" }),
+            h("div", { className: "qbw-actions" }, h(Btn, { kind: "qbw-btn2", onClick: () => saveConfig(ext.id), disabled: !!busy }, "保存配置"))))),
+        h("div", { className: "qbw-group" }, "Log Terminal ",
+          h("small", null, `${entries.length} 条 / 仅本机`)),
+        h("div", { className: "qbw-search" },
+          h("select", { className: "qbw-select", value: outcome, onChange: (e) => setOutcome(e.target.value) },
+            h("option", { value: "" }, "全部结果"),
+            h("option", { value: "ok" }, "ok"),
+            h("option", { value: "denied" }, "denied"),
+            h("option", { value: "unknown" }, "unknown"),
+            h("option", { value: "error" }, "error"),
+            h("option", { value: "rate-limited" }, "rate-limited"),
+            h("option", { value: "silent" }, "silent"),
+            h("option", { value: "forwarded" }, "forwarded")),
+          h("input", { className: "qbw-input", placeholder: "搜命令 / 发送者 / code", value: query, onChange: (e) => setQuery(e.target.value) }),
+          h(Btn, { kind: "qbw-btn2", onClick: () => setAuto((v) => !v), disabled: !!busy }, auto ? "暂停自动刷新" : "恢复自动刷新"),
+          h(Btn, { kind: "qbw-btn2", onClick: clearLog, disabled: !!busy }, "备份并清空")),
+        entries.length === 0 ? h("div", { className: "qbw-terminal" }, "（暂无命令日志）") : h("div", { className: "qbw-terminal" },
+          entries.map((entry) => h("div", { className: "qbw-logline", key: entry.seq },
+            h("span", { className: "meta" }, String(entry.at ?? "").slice(11, 19)),
+            h("span", { className: "meta" }, `${entry.actorName || entry.actorId || "—"} @ ${entry.key || "—"}`),
+            h("span", { className: `body ${entry.level === "error" ? "bad" : entry.level === "warn" ? "warn" : ""}` },
+              `${entry.raw}  →  ${entry.outcome}${entry.code ? "/" + entry.code : ""}${entry.reply ? " · 已回复" : " · 未回复"}${entry.hint ? " · " + entry.hint : ""}`)))),
+        h("div", { className: "qbw-hint" }, "日志文件：state/command-log.jsonl（桥接进程）。失败路径不会回 QQ。"));
+    }
+
     // ── 扩展与平台 ──────────────────────────────────────────────────────────
     function ExtensionsTab({ busy, setBusy, toast, reload }) {
       const [data, setData] = useState(null);
@@ -5244,6 +5357,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       ["memory", "记忆"],
       ["align", "对齐"],
       ["extensions", "扩展"],
+      ["commands", "Log Terminal"],
       ["advanced", "全部参数"],
       ["diag", "诊断"],
     ];
@@ -5453,6 +5567,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "memory") return h(MemoryTab, { qq: normalizedQq, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload });
         if (tab === "align") return h(AlignTab, { busy, setBusy, toast: notify, reload });
         if (tab === "extensions") return h(ExtensionsTab, { busy, setBusy, toast: notify, reload });
+        if (tab === "commands") return h(CommandTerminalTab, { busy, setBusy, toast: notify });
         if (tab === "advanced") return h(AdvancedTab, { qq: normalizedQq, bili, unified: normalizedUnified, setQqPath, setBiliPath, setUnifiedPath, busy });
         if (tab === "diag") return h(DiagnosticsTab, { busy, setBusy, toast: notify, reload });
         return null;

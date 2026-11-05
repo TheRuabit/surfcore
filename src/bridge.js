@@ -75,6 +75,9 @@ import { createBM25Store } from './memory-bm25.js';
 import { createShadowRetriever } from './memory-shadow.js';
 import { isMemoryNoiseText, pickShadowQuery } from './memory-query.js';
 import { createReminderScheduler } from './reminder-scheduler.js';
+import { createCommandHost } from './command-host.js';
+import { createCommandLog } from './command-log.js';
+import { createSharedStore } from './shared-store.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
@@ -6075,6 +6078,49 @@ async function main() {
           sendJson({ ok: true, reminder: result.reminder });
           return;
         }
+        // 命令插件与 Log Terminal：只对本机控制台开放，agent token 不可用。
+        if (url.pathname === '/api/commands/plugins' && (req.method === 'GET' || req.method === 'POST')) {
+          if (req.method === 'GET') { sendJson(commandHost.list()); return; }
+          try {
+            const body = await readBody();
+            const action = String(body.action ?? '').trim();
+            const id = String(body.id ?? '').trim();
+            if (!id) { sendJson({ ok: false, code: 'missing-id', error: '缺少插件 id', hint: '刷新插件列表后重试' }, 400); return; }
+            if (action === 'toggle') {
+              const listed = await commandHost.setEnabled(id, body.enabled === true);
+              sendJson({ ok: true, result: listed });
+              return;
+            }
+            if (action === 'reload') {
+              const listed = await commandHost.reload(id);
+              sendJson({ ok: true, result: listed });
+              return;
+            }
+            if (action === 'config') {
+              const config = commandHost.setConfig(id, body.config ?? {});
+              sendJson({ ok: true, config, result: commandHost.list() });
+              return;
+            }
+            sendJson({ ok: false, code: 'unknown-action', error: `未知 action：${action}`, hint: '可用：toggle / reload / config' }, 400);
+          } catch (error) {
+            sendJson({ ok: false, code: 'command-plugin-error', error: String(error?.message ?? error), hint: '检查 manifest/entry，或看 state/command-log.jsonl 与 bridge.log' }, 500);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/commands/log') {
+          const result = commandLog.tail({
+            limit: Number(url.searchParams.get('limit')) || 200,
+            since: Number(url.searchParams.get('since')) || 0,
+            outcome: String(url.searchParams.get('outcome') ?? ''),
+            q: String(url.searchParams.get('q') ?? ''),
+          });
+          sendJson(result);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/commands/log/clear') {
+          sendJson(commandLog.clear());
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/states') {
           const list = [];
           for (const [key, st] of socialV2.conversations) {
@@ -8690,6 +8736,52 @@ async function main() {
     wake: async (key, text, reminder) => wakeForReminder(key, text, reminder)
   });
 
+  const commandLog = createCommandLog({
+    file: path.join(STATE_DIR, 'command-log.jsonl'),
+    log,
+    sanitize: (value) => redactKnownTokensOnly(value),
+    maxEntries: Number(cfg.commands?.logMaxEntries) || 2000,
+  });
+  const sharedStore = createSharedStore({
+    dir: path.join(path.dirname(activeMemoryPaths().dir), 'shared'),
+    log,
+  });
+  const commandHost = createCommandHost({
+    dirs: [
+      path.join(ROOT, 'plugins', 'surfcore', 'command-plugins'),
+      path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'surfcore', 'command-plugins'),
+    ],
+    stateFile: path.join(STATE_DIR, 'command-plugins.json'),
+    dataRoot: path.join(STATE_DIR, 'command-plugins'),
+    commandLog,
+    shared: sharedStore,
+    log,
+    sendReply: (key, result) => sendCommandReply(key, result),
+    activeMembers: readArchiveActiveMembers,
+    ratePerMinute: Number(cfg.commands?.ratePerMinute) || 30,
+  });
+
+  function logBridgeCommand({ key, event, plainContent, displayName, outcome, code = '', hint = '', reply = false, durationMs = 0 }) {
+    try {
+      commandLog.append({
+        outcome,
+        code,
+        hint,
+        key,
+        actorId: event?.user_id ?? '',
+        actorName: displayName ?? '',
+        raw: plainContent,
+        command: String(plainContent ?? '').replace(/^\//, '').split(/\s+/)[0] ?? '',
+        plugin: 'bridge',
+        permission: 'admin',
+        reply,
+        durationMs,
+      });
+    } catch (error) {
+      log(`[commands] 桥接命令日志失败：${String(error?.message ?? error)}`);
+    }
+  }
+
   /** 上一批发往该会话的消息是否全部成功。 */
   function lastSendSucceeded(key) {
     return lastSendFailed.get(key) !== true;
@@ -8952,6 +9044,78 @@ async function main() {
       throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
     }
     return body.data;
+  }
+
+  async function sendCommandReply(key, rawResult) {
+    const result = typeof rawResult === 'string' ? { text: rawResult } : (rawResult && typeof rawResult === 'object' ? rawResult : {});
+    const [kind, id] = String(key).split(':');
+    if (!id) throw new Error('命令回复 key 不合法');
+    const segments = [];
+    if (result.replyToMessageId !== undefined && result.replyToMessageId !== null && String(result.replyToMessageId).trim() !== '') {
+      const rid = String(result.replyToMessageId).trim();
+      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数');
+      segments.push({ type: 'reply', data: { id: rid } });
+    }
+    if (result.atUserId !== undefined && result.atUserId !== null && String(result.atUserId).trim() !== '') {
+      const at = String(result.atUserId).trim();
+      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+      segments.push({ type: 'at', data: { qq: at } });
+    }
+    const text = redactKnownTokensOnly(String(result.text ?? '')).slice(0, 500);
+    if (text) segments.push({ type: 'text', data: { text: escapeCqText(text) } });
+    const image = String(result.image ?? '').trim();
+    if (image) {
+      if (!/^https?:\/\//i.test(image) && !path.isAbsolute(image)) throw new Error('image 必须是 http(s) 地址或本机绝对路径');
+      segments.push({ type: 'image', data: { file: image } });
+    }
+    if (!segments.length) return { ok: true, empty: true };
+    await onebotSendSegments(kind, Number(id), segments);
+    return { ok: true };
+  }
+
+  function readArchiveActiveMembers({ key, days = 30, limit = 100 } = {}) {
+    if (!String(key).startsWith('group:')) return [];
+    const cutoff = Date.now() - Math.max(1, Math.min(90, Number(days) || 30)) * 86_400_000;
+    const file = path.join(STATE_DIR, cfg.vectorMemory?.archiveFile || 'message-archive.jsonl');
+    const map = new Map();
+    try {
+      const raw = fs.readFileSync(file, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        let item;
+        try { item = JSON.parse(line); } catch { continue; }
+        if (String(item?.key ?? '') !== String(key)) continue;
+        if (item?.type && item.type !== 'message') continue;
+        if (Number(item?.time) < cutoff) continue;
+        const userId = String(item?.userId ?? '').trim();
+        if (!userId || userId === String(selfUserId)) continue;
+        if (String(item?.sender ?? '') === '我') continue;
+        const current = map.get(userId) ?? { userId, sender: String(item?.sender ?? userId), count: 0, lastTime: 0 };
+        current.count += 1;
+        if (Number(item?.time) > current.lastTime) {
+          current.lastTime = Number(item.time);
+          current.sender = String(item?.sender ?? current.sender);
+        }
+        map.set(userId, current);
+      }
+    } catch { /* 归档不可用时回退最近消息 */ }
+    if (!map.size) {
+      try {
+        const st = getSocialV2State(key);
+        for (const msg of st.recentMessages ?? []) {
+          if (!msg || msg.isSelf) continue;
+          const userId = String(msg.userId ?? '').trim();
+          if (!userId || userId === String(selfUserId)) continue;
+          const current = map.get(userId) ?? { userId, sender: String(msg.sender ?? userId), count: 0, lastTime: 0 };
+          current.count += 1;
+          current.lastTime = Math.max(current.lastTime, Number(msg.time) || 0);
+          map.set(userId, current);
+        }
+      } catch { /* ignore */ }
+    }
+    return [...map.values()]
+      .sort((a, b) => b.count - a.count || b.lastTime - a.lastTime)
+      .slice(0, Math.max(1, Math.min(500, Number(limit) || 100)));
   }
 
   // B站视频卡片：默认发 com.tencent.structmsg 新闻链接卡（普通分享卡，点开进 B站）。
@@ -14067,6 +14231,9 @@ async function main() {
 
     // 静默模式：群友消息不投递给 agent（只记录）；管理员消息照常
     if (roleState.mode === 'silent' && !isOwner) {
+      if (String(plainContent).startsWith('/')) {
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'silent', code: 'silent-mode', hint: '静默模式忽略群友命令；失败只记日志，不回 QQ' });
+      }
       appendActivity(`${key}（静默模式）群友 ${event.user_id}：${textContent.slice(0, 80)}`);
       log(`静默模式，忽略群友消息 ${key}`);
       return;
@@ -14078,8 +14245,24 @@ async function main() {
       return;
     }
 
-    // 管理命令：仅管理员（ownerQQ）可用，且由桥接直接执行（硬性，不经过模型）
+    // 命令：先交给本地命令插件；未命中再走桥接内置管理命令。
+    // 失败（权限/未知/禁用/异常/限流）只写入 Log Terminal，不回 QQ。
     if (plainContent.startsWith('/')) {
+      const atTargets = (event.message ?? [])
+        .filter((seg) => seg?.type === 'at' && String(seg?.data?.qq ?? '') !== 'all')
+        .map((seg) => ({ qq: String(seg.data.qq), name: String(seg.data.name ?? '') }));
+      const dispatched = await commandHost.dispatch({
+        key,
+        kind,
+        groupId: String(id),
+        userId: String(event.user_id ?? ''),
+        senderName: displayName,
+        isOwner,
+        messageId: String(event.message_id ?? event.msg_id ?? ''),
+        raw: plainContent,
+        atTargets,
+      });
+      if (dispatched.matched) return;
       if (!isOwner) {
         if (/^\/role\b/.test(plainContent)) {
           auditOwner('role.switch', {
@@ -14091,9 +14274,16 @@ async function main() {
             ref: { session: key },
           });
         }
-        await sendToQQ(key, '管理命令仅管理员可用。');
+        const builtin = /^\/(?:reset|new|status|role|silent|quiet|active|speak)\b/.test(plainContent);
+        logBridgeCommand({
+          key, event, plainContent, displayName,
+          outcome: 'denied',
+          code: builtin ? 'not-owner' : 'unknown-command',
+          hint: builtin ? '仅管理员可用；失败只记日志，不回 QQ' : '命令未注册；群友失败只记日志，不回 QQ',
+        });
         return;
       }
+      const startedAt = Date.now();
       if (plainContent === '/reset' || plainContent === '/new') {
         const old = state.sessions[key];
         if (old) {
@@ -14145,11 +14335,13 @@ async function main() {
           try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
           await sendToQQ(key, '已重置会话，下次消息将开新上下文');
         }
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: Boolean(old), durationMs: Date.now() - startedAt });
         return;
       }
       if (plainContent === '/status') {
         const rs = readRoleState();
         await sendToQQ(key, `会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfg) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
       if (plainContent === '/role' || plainContent.startsWith('/role ')) {
@@ -14178,19 +14370,23 @@ async function main() {
             await sendToQQ(key, `已切换角色：${name}。`);
           }
         }
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
       if (plainContent === '/silent' || plainContent === '/quiet') {
         writeRoleState(roleState.role, 'silent');
         await sendToQQ(key, '已进入静默模式：群友消息不再回复，仅管理员可对话。');
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
       if (plainContent === '/active' || plainContent === '/speak') {
         writeRoleState(roleState.role, 'active');
         await sendToQQ(key, '已退出静默模式，恢复正常回复。');
+        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
       // 其余 / 开头内容照常发给 DSH（DSH 的斜杠命令原样执行，如 /model）
+      logBridgeCommand({ key, event, plainContent, displayName, outcome: 'forwarded', code: 'forwarded-dsh', hint: '由 DSH 解释；失败详情看 DSH', durationMs: Date.now() - startedAt });
     }
 
     // 二代仿真模式（reserved2）：唤醒调度
@@ -15449,6 +15645,8 @@ async function main() {
   log('桥接已启动。按 Ctrl+C 退出。');
   // 等 bot 初始化完成后再装载提醒，避免过期补发时访问尚未初始化的 SnowLuma 客户端。
   reminderScheduler.load();
+  // 命令插件与 DSH 无关；桥接启动即加载，DSH 挂了也能响应插件命令。
+  await commandHost.load().catch((error) => log(`[commands] 加载失败：${String(error?.message ?? error)}`));
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

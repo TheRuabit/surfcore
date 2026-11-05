@@ -77,6 +77,8 @@ const tests = [
   'test-vector-memory.mjs', 'test-memory-bm25.mjs',
   // 定时提醒：set/cancel/持久化/过期补发/wake=false|true 两种模式。
   'test-reminder-scheduler.mjs',
+  // 命令插件：通用宿主/日志/示例/接线（失败只日志，不直接回 QQ）。
+  'test-command-host.mjs', 'test-command-log.mjs', 'test-command-example.mjs', 'test-command-wiring.mjs',
   // 角色人格：多角色目录隔离 / 切换 epoch / 快照回档 / 旧数据迁移（含凭证不进角色包）。
   'test-character-store.mjs',
   // B站 工具链路径：有角色时行为账本进角色包，cookie/表情包仍在账号目录。

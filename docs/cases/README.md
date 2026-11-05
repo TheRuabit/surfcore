@@ -6,6 +6,7 @@
 
 | 日期 | 案例 | 一句话 | 版本 |
 | --- | --- | --- | --- |
+| 2026-11-05 | [命令插件接口 + Log Terminal](2026-11-05-command-plugin-terminal.md) | 非管理员 `/` 失败不再直接回 QQ，改写入本地日志；桥接侧通用命令插件接口 + 示例插件（不含 wifepicker 业务） | 待发布 |
 | 2026-11-03 | [定时提醒：她说“没有定时器，只有 wait”](2026-11-03-reminder-scheduler.md) | `schedule_*` 被 QQ preset ban、`sleepUntil` 一次性且会被顶掉 → 独立 `qq_set_reminder`（wake=false 直发 / true 唤醒） | 待发布 |
 | 2026-10-31 | [长期记忆检索没生效：query 读错表 + 自匹配](2026-10-31-vector-memory-retrieval.md) | reserved2 读 v1 Map 恒空、before 挡不住自匹配、归档正则失效 → 改用 v2 窗口 + 以最早消息为上界 + 补测 | 待发布 |
 | 2026-10-31 | [长中文回答导致 tool JSON 崩塌](2026-10-31-tool-json-malformed.md) | 模型把 messages 值裸写进 JSON，整轮 MALFORMED_RESPONSE | v0.7.17 |
