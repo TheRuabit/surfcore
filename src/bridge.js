@@ -8864,6 +8864,7 @@ async function main() {
     log,
     sendReply: (key, result) => sendCommandReply(key, result),
     activeMembers: readArchiveActiveMembers,
+    readMessages: readArchiveMessages,
     ratePerMinute: Number(cfg.commands?.ratePerMinute) || 30,
   });
 
@@ -9231,6 +9232,62 @@ async function main() {
     return [...map.values()]
       .sort((a, b) => b.count - a.count || b.lastTime - a.lastTime)
       .slice(0, Math.max(1, Math.min(500, Number(limit) || 100)));
+  }
+
+  /**
+   * 按绝对时间窗读取归档消息（给需要原文的插件用，如群报）。
+   *
+   * 与 readArchiveActiveMembers 的区别：那个只给计数、按相对天数；
+   * 这个给原文、按 since/until 绝对时间戳，且归档不可用时**明确报错**而不是返回空数组 ——
+   * 归档的写入由 vectorMemory.enabled/shadow 控制，插件无法感知这个开关。
+   */
+  function readArchiveMessages({ key, since = 0, until = Date.now(), limit = 2000, maxBytes = 4 * 1024 * 1024 } = {}) {
+    const conversationKey = String(key ?? '').trim();
+    if (!conversationKey.startsWith('group:')) {
+      return { ok: false, code: 'unsupported-key', error: '只支持群聊会话（group:...）', hint: '群报类插件只读群聊；私聊记录不进报告' };
+    }
+    const from = Number(since) > 0 ? Number(since) : 0;
+    const to = Number(until) > 0 ? Number(until) : Date.now();
+    const cap = Math.max(1, Math.min(5000, Number(limit) || 2000));
+    const byteCap = Math.max(64 * 1024, Math.min(32 * 1024 * 1024, Number(maxBytes) || 4 * 1024 * 1024));
+    const file = path.join(STATE_DIR, cfg.vectorMemory?.archiveFile || 'message-archive.jsonl');
+    if (!fs.existsSync(file)) {
+      return {
+        ok: false,
+        code: 'archive-missing',
+        error: '消息归档不存在，读取不到历史消息',
+        hint: '在设置 → 向量记忆里开启（归档随它写入）；否则群报类插件没有数据源',
+      };
+    }
+    let raw = '';
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch (error) {
+      return { ok: false, code: 'archive-unreadable', error: String(error?.message ?? error), hint: '检查 state 目录权限，或看 bridge.log' };
+    }
+    if (raw.length > byteCap) {
+      // 只读尾部：归档按时间追加，最新的一定在末尾。
+      const sliced = raw.slice(raw.length - byteCap);
+      const nl = sliced.indexOf('\n');
+      raw = nl >= 0 ? sliced.slice(nl + 1) : sliced;
+    }
+    const messages = [];
+    let truncated = raw.length >= byteCap;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let item;
+      try { item = JSON.parse(line); } catch { continue; }
+      if (String(item?.key ?? '') !== conversationKey) continue;
+      if (item?.type && item.type !== 'message') continue;
+      const at = Number(item?.time) || 0;
+      if (at < from || at > to) continue;
+      const userId = String(item?.userId ?? '').trim();
+      const isSelf = Boolean(!userId || userId === String(selfUserId) || String(item?.sender ?? '') === '我');
+      messages.push({ at, userId, sender: String(item?.sender ?? ''), text: String(item?.text ?? ''), isSelf });
+      if (messages.length >= cap) { truncated = true; break; }
+    }
+    messages.sort((a, b) => a.at - b.at);
+    return { ok: true, messages, total: messages.length, truncated };
   }
 
   // B站视频卡片：默认发 com.tencent.structmsg 新闻链接卡（普通分享卡，点开进 B站）。

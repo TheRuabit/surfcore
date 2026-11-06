@@ -107,3 +107,35 @@ test('审计：示例插件旧回复里的本机路径确实会被拦', async ()
   assert.equal(SENSITIVE_RE.test('接口正常：I love you'), false);
   assert.equal(SENSITIVE_RE.test('example 插件运行中。'), false);
 });
+
+test('接线：桥接暴露 readMessages，群报插件默认关闭', () => {
+  const bridge = read('src/bridge.js');
+  assert.match(bridge, /function readArchiveMessages\(/, '桥接缺少 readArchiveMessages');
+  assert.match(bridge, /readMessages: readArchiveMessages/, 'readMessages 没装配进 createCommandHost');
+  assert.match(bridge, /code: 'archive-missing'/);
+  assert.match(bridge, /code: 'unsupported-key'/);
+
+  const host = read('src/command-host.js');
+  assert.match(host, /messages: async \(\{ key, since, until, limit, maxBytes \} = \{\}\)/);
+  assert.match(host, /code: 'not-supported'/);
+
+  const manifest = JSON.parse(read('plugins/surfcore/command-plugins/daily-report/manifest.json'));
+  assert.equal(manifest.id, 'daily-report');
+  assert.equal(manifest.enabled, false, '群报插件默认必须关闭');
+
+  const plugin = read('plugins/surfcore/command-plugins/daily-report/index.js');
+  assert.match(plugin, /previewOnly: true/, '默认必须是预览模式');
+  assert.match(plugin, /scopes: \['group'\]/);
+  assert.match(plugin, /name: '今日群报'/);
+  assert.match(plugin, /name: '群报设置'/);
+  // 群报不能把本机路径回显到 QQ
+  assert.ok(!plugin.includes('api.dataDir}'), '插件不该把 dataDir 拼进回复文本');
+});
+
+test('接线：群报纯函数模块只依赖自身，不碰 IO', () => {
+  const core = read('src/daily-report-core.js');
+  assert.ok(!/from 'node:fs'/.test(core), '纯函数模块不该 import fs');
+  assert.match(core, /export function aggregateMessages/);
+  assert.match(core, /export function renderReport/);
+  assert.match(core, /export function isReportable/);
+});

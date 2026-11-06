@@ -6,6 +6,7 @@
 
 | 日期 | 案例 | 一句话 | 版本 |
 | --- | --- | --- | --- |
+| 2026-11-07 | [今日群报插件](2026-11-07-daily-report-plugin.md) | 第一个真实命令插件：按绝对时间窗读归档 + 纯函数采样聚合，0 token；默认只落盘预览 | 待发布 |
 | 2026-11-06 | [黑话库：AI 自证 + 统计预筛](2026-11-06-slang-self-approval-and-filter.md) | tool 没有写词义的入口 + 提交硬编码 candidate → 加 meaning 字段、带词义即 confirmed、零 token 预筛 | 待发布 |
 | 2026-11-06 | [群内命令必须 @机器人](2026-11-06-command-prefix-and-scope.md) | 裸 `/` 吃掉真实用法（归档 0 条裸斜杠 / 10 条 @前缀）→ 按消息段切前缀 + scopes 生效 + 未知命令留痕 + 删 QQ→DSH 转发 | 待发布 |
 | 2026-11-05 | [命令插件接口 + Log Terminal](2026-11-05-command-plugin-terminal.md) | 非管理员 `/` 失败不再直接回 QQ，改写入本地日志；桥接侧通用命令插件接口 + 示例插件（不含 wifepicker 业务） | 待发布 |

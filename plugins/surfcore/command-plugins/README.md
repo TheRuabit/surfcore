@@ -114,9 +114,35 @@ export async function activate(api) {
 | `api.config.get()/set(v)` | 本插件配置（落 `state/command-plugins.json`） |
 | `api.dataDir` | `state/command-plugins/<id>/` |
 | `api.log(...)` | 写桥接日志 |
-| `api.qq.activeMembers({ key, days, limit })` | 只读当前群近期发言者（给需要“活跃群友”的插件） |
+| `api.qq.activeMembers({ key, days, limit })` | 只读当前群近期发言者（给需要"活跃群友"的插件） |
+| `api.qq.messages({ key, since, until, limit })` | 按**绝对时间窗**读群聊原文（见下） |
 | `api.shared` | 命名空间共享存储（跨插件/进程少量结构化数据） |
 | `api.crypto.randomUUID()` | 生成 id |
+
+### `api.qq.messages`：按时间窗读原文
+
+需要看聊天内容的插件（群报、话题分析）用它。返回**原样失败**，不像 `activeMembers` 那样吞成空数组：
+
+```js
+const r = await api.qq.messages({
+  key: 'group:824266596',
+  since: Date.parse('2026-11-06T00:00:00+08:00'),
+  until: Date.parse('2026-11-07T00:00:00+08:00'),
+});
+// 成功 → { ok:true, messages:[{ at, userId, sender, text, isSelf }], total, truncated }
+// 失败 → { ok:false, code, error, hint }
+```
+
+| code | 含义 | 插件该做什么 |
+| --- | --- | --- |
+| `archive-missing` | 归档没生成过 | 提示去设置里开向量记忆 |
+| `archive-unreadable` | 读不动（权限/损坏） | 提示看 bridge.log |
+| `unsupported-key` | 不是 `group:` 会话 | 群报类插件只读群聊 |
+| `not-supported` | 宿主太旧 | 提示升级 |
+
+**重要**：归档由 `vectorMemory.enabled / shadow` 控制写入。关掉向量记忆 → 归档停写 → 这里会报 `archive-missing`。插件必须处理这个失败，不能假设永远有数据。
+
+每条消息的 `text` **最多 200 字**（入库时就截断了），不是全文。
 
 ### 日切（+08:00）
 

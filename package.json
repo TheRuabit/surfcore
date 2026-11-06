@@ -43,7 +43,7 @@
     "test:memory-card-wiring": "node scripts/test-memory-card-wiring.mjs",
     "test:memory": "node scripts/test-vector-memory.mjs && node scripts/test-memory-bm25.mjs",
     "test:reminder": "node scripts/test-reminder-scheduler.mjs",
-    "test:commands": "node scripts/test-command-text.mjs && node scripts/test-command-log.mjs && node scripts/test-command-host.mjs && node scripts/test-command-example.mjs && node scripts/test-command-wiring.mjs",
+    "test:commands": "node scripts/test-command-text.mjs && node scripts/test-command-log.mjs && node scripts/test-command-host.mjs && node scripts/test-command-example.mjs && node scripts/test-command-wiring.mjs && node scripts/test-daily-report-core.mjs && node scripts/test-command-daily-report.mjs",
     "test:slang": "node scripts/test-slang-filter.mjs && node scripts/test-slang-submit.mjs && node scripts/test-slang-inject.mjs",
     "test:admin": "node scripts/test-admin-identity.mjs && node scripts/test-admin-prompt-wiring.mjs",
     "preview:console": "node scripts/console-ui-fixture.mjs",

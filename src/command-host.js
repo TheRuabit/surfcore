@@ -89,6 +89,7 @@ export function createCommandHost({
   log = () => {},
   sendReply = async () => {},
   activeMembers = async () => [],
+  readMessages = null,
   now = Date.now,
   ratePerMinute = DEFAULT_RATE_PER_MINUTE,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
@@ -217,6 +218,20 @@ export function createCommandHost({
           } catch (error) {
             log(`[ext:${manifest.id}] activeMembers 失败：${text(error?.message ?? error)}`);
             return [];
+          }
+        },
+        // 按绝对时间窗读原文。与 activeMembers 不同：失败时原样返回 { ok:false, code, error, hint }，
+        // 让插件能区分「这段时间没人说话」和「归档压根没开」。
+        messages: async ({ key, since, until, limit, maxBytes } = {}) => {
+          if (typeof readMessages !== 'function') {
+            return { ok: false, code: 'not-supported', error: '宿主未提供消息读取能力', hint: '升级 SurfCore 或检查桥接版本' };
+          }
+          try {
+            return await readMessages({ key: String(key ?? ''), since, until, limit, maxBytes });
+          } catch (error) {
+            const message = text(error?.message ?? error, 300);
+            log(`[ext:${manifest.id}] messages 失败：${message}`);
+            return { ok: false, code: 'read-failed', error: message, hint: '看 bridge.log 的插件堆栈' };
           }
         },
       },

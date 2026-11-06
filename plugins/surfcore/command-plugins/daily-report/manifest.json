@@ -1,0 +1,16 @@
+{
+  "id": "daily-report",
+  "name": "今日群报",
+  "version": "0.1.0",
+  "description": "把群里某一天的聊天聚合成日报；默认只落盘不发言，便于本地预览样式。",
+  "entry": "index.js",
+  "enabled": false,
+  "capabilities": [
+    "qq.command"
+  ],
+  "platforms": [
+    "qq"
+  ],
+  "author": "local",
+  "requiresRestart": false
+}

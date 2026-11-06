@@ -279,3 +279,67 @@ test('宿主：激活失败的插件不会把 enabled=true 落盘', async () => 
   assert.equal(item.enabled, false, '激活失败的插件不该显示为已启用');
   await host.close();
 });
+
+test('宿主：api.qq.messages 透传 readMessages，失败原样返回', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'msgs-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'msgplug'), 'msgplug', `
+export async function activate(api) {
+  api.commands.register({ name: '取消息', permission: 'user', handler: async (ctx) => {
+    const r = await api.qq.messages({ key: ctx.key, since: 0, until: Date.now() });
+    return { silent: true, __r: r };
+  } });
+}
+`);
+  const seen = [];
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    sendReply: async () => {},
+    readMessages: async ({ key, since, until }) => {
+      seen.push({ key, since, until });
+      return { ok: true, messages: [{ at: 1, userId: '1', sender: '甲', text: 'hi', isSelf: false }], total: 1, truncated: false };
+    },
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('msgplug', true);
+  const r = await host.dispatch(ctx({ raw: '/取消息' }));
+  assert.equal(r.outcome, 'ok');
+  assert.equal(seen.length, 1, 'readMessages 没被调用');
+  assert.equal(seen[0].key, 'group:1');
+  await host.close();
+});
+
+test('宿主：没有 readMessages 时返回 not-supported 而不是崩溃', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'nomsg-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'msgplug'), 'msgplug', `
+export async function activate(api) {
+  api.commands.register({ name: '取消息', permission: 'user', handler: async (ctx) => {
+    const r = await api.qq.messages({ key: ctx.key });
+    throw new Error(JSON.stringify(r));
+  } });
+}
+`);
+  const commandLog = createCommandLog({ file: path.join(dir, 'log.jsonl') });
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    commandLog,
+    sendReply: async () => {},
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('msgplug', true);
+  const r = await host.dispatch(ctx({ raw: '/取消息' }));
+  assert.equal(r.outcome, 'error');
+  const entry = commandLog.tail().entries.at(-1);
+  assert.equal(entry.code, 'plugin-error');
+  assert.match(String(entry.message), /not-supported/, '应返回 not-supported 而非抛异常');
+  await host.close();
+});
