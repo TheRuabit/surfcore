@@ -983,18 +983,32 @@ server.tool(
 
 server.tool(
   'qq_slang_submit',
-  '把你在群里经常看到但不确定含义/用法的陌生词、黑话、梗或网络表达提交给管理员筛选。提交后进入候选库，管理员确认后会被写入黑话提示词，成为你后续可查询和使用的记忆。',
+  '提交群聊黑话/梗/网络表达。**关键：带上 meaning 会被直接采纳为已确认并写进后续提示词；不带 meaning 只进候选库，不会生效。** ' +
+  '所以只要你对含义有把握，就一次性把 meaning 写全，不要让词条卡在候选池里。' +
+  '不确定含义时也可以先只交 content，等看到更多语境再用同一条命令补 meaning。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
     content: z.string().describe('要提交的陌生词/黑话/梗（最多 50 字）'),
-    context: z.string().optional().describe('可选：你是在什么语境/哪条消息里看到的，帮助管理员判断')
+    meaning: z.string().optional().describe('词义（最多 300 字）。给了就会直接采纳为已确认；给不出就别硬编，留空走候选池'),
+    usage: z.string().optional().describe('可选：用法（在什么场景/什么语气下用）'),
+    example: z.string().optional().describe('可选：一个例句'),
+    confidence: z.enum(['high', 'low']).optional().describe('可选：你对 meaning 的把握。low 表示不太确定，此时即使给了 meaning 也只进候选池'),
+    context: z.string().optional().describe('可选：你是在什么语境/哪条消息里看到的')
   },
-  async ({ key, token, content, context }) => {
+  async ({ key, token, content, meaning, usage, example, confidence, context }) => {
     try {
       const data = await agentApi('/api/socialV2/slang/submit', {
         method: 'POST',
-        body: JSON.stringify({ key, content, context: context || '' }),
+        body: JSON.stringify({
+          key,
+          content,
+          context: context || '',
+          meaning: meaning || '',
+          usage: usage || '',
+          example: example || '',
+          confidence: confidence || ''
+        }),
         headers: { 'x-agent-token': token }
       });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };

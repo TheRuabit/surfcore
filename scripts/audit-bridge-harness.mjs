@@ -15,6 +15,7 @@ import * as safeFetch from '../src/safe-fetch.js';
 import * as forward from '../src/forward.js';
 import * as selfIdentity from '../src/self-identity.js';
 import * as slang from '../src/slang-learner.js';
+import * as slangFilter from '../src/slang-filter.js';
 import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
@@ -216,6 +217,17 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     closeConversationV2, assessClosureV2, closureConfigV2, closureSuppressesWake, noteClosureReopenV2,
     voiceCfg, voiceLibrary, resolveVoicePathForV2, resolveVoicePathForOperator, synthesizeVoiceText,
     voiceBudgetCheck, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
+    // 黑话：预筛 / 准入 / 注入位置，供 test-slang-*.mjs 直接断言（不连真 QQ）。
+    slangFilter, withSlangContext, queueResearchFromFilter, slangResearchDay: () => slangResearchDay,
+    getSlangEntries: () => slangEntries,
+    applySlangSubmit(body) {
+      // 复刻 /slang/submit 的准入规则，供测试断言"带 meaning 即 confirmed"。
+      const content = String(body?.content ?? '').trim();
+      const meaning = String(body?.meaning ?? '').trim();
+      const confidence = String(body?.confidence ?? '').trim().toLowerCase();
+      const autoConfirm = Boolean(meaning) && confidence !== 'low';
+      return { autoConfirm, status: autoConfirm ? SLANG_STATUS.CONFIRMED : SLANG_STATUS.CANDIDATE };
+    },
     setMode(value) { currentMode = value; },
     setReady(value) { dshReady = value; },
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
@@ -243,7 +255,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     isLoopbackBaseUrl,
     probeDshBaseUrl: async () => true,
     discoverDshBaseUrl: async () => null,
-    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...sticker,
+    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...slangFilter, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...fishGuard, ...tokenGuard,
     ...voiceDiagnostics,
     synthesizeToFile,

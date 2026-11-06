@@ -103,6 +103,7 @@ import {
   SLANG_STATUS,
   SLANG_MAX_ENTRIES
 } from './slang-learner.js';
+import { createSlangFilter } from './slang-filter.js';
 import {
   loadStickerStore,
   saveStickerStore,
@@ -1814,6 +1815,13 @@ async function main() {
   let biliShare = null;
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
+  // meaning/usage/example 的长度上限，与 slang-learner 的字段裁剪保持一致。
+  const SLANG_FIELD_MAX_LEN = 300;
+  // 统计预筛：本地算分，零模型调用；研究只从它的高分候选里挑。
+  const slangFilter = createSlangFilter();
+  // 每日研究配额：预筛不给上限的话，第一次触发就会把当天额度一次烧完。
+  let slangResearchDay = { key: '', count: 0 };
+  let slangResearchQueuedAt = 0;
   let slangEntries = [];
   // 读失败时（被占用 / 权限 / JSON 损坏）必须**暂停写入**：否则内存里的空数组
   // 会在下一次 saveSlangStore() 时覆盖掉磁盘上那份数据，学到的词条全丢。
@@ -2984,17 +2992,21 @@ async function main() {
       for (const r of results) {
         const entry = slangEntries.find((e) => e.content === r.content);
         if (!entry) continue;
-        // 只有明确确认（confirmed: true）的结果才写入解释字段；
-        // 不确定/未确认的结果保留原状，允许后续再次研究。
-        if (r.confirmed !== true) {
-          log(`黑话研究：${r.content} 未确认，保留候选待后续研究`);
+        // 有词义就采纳：不再强求模型返回 confirmed:true。
+        // 旧逻辑要求模型自己确认，等于把"批准"这一关又推回给模型，而它通常只回 meaning。
+        // 现在的准入契约是「词义即证据」：meaning 非空且不是 no_info 就写入并转正。
+        const meaningText = String(r.meaning ?? '').trim();
+        if (!meaningText || /^no[_-]?info\.?$/i.test(meaningText)) {
+          log(`黑话研究：${r.content} 未给出有效释义，保留候选待后续研究`);
           continue;
         }
-        if (r.meaning) entry.meaning = r.meaning;
+        entry.meaning = meaningText;
         if (r.usage) entry.usage = r.usage;
         if (r.example) entry.example = r.example;
         if (r.risk) entry.risk = r.risk;
         if (Array.isArray(r.sources) && r.sources.length) entry.sources = r.sources.map((s) => String(s ?? '').trim()).filter(Boolean).slice(0, 10);
+        // 有释义即转正：注释里标注来源，方便以后怀疑时回溯。
+        entry.status = SLANG_STATUS.CONFIRMED;
         entry.lastInferenceCount = entry.count;
         entry.updatedAt = new Date().toISOString();
       }
@@ -3010,6 +3022,48 @@ async function main() {
     }
   }
 
+  /**
+   * 按统计预筛结果挑候选去研究。
+   *
+   * 这是「不手工批准、也不让 DS 全量扫描」的折中：只有本地算分排在前面的词
+   * 才值得花一次模型调用。researchPerDayMax 是硬上限，超了就攒到明天。
+   */
+  function queueResearchFromFilter(key) {
+    if (cfg.slang?.enabled === false) return 0;
+    if (cfg.slang?.autoResearch === false) return 0;
+    if (!dshReady || learnerBudgetBlock()) return 0;
+    // 节流：预筛随每条消息更新，但研究触发要隔一段时间，否则一条活跃消息流会瞬间打满额度。
+    const cooldown = Math.max(60_000, Number(cfg.slang?.researchCooldownMs) || 30 * 60_000);
+    if (Date.now() - slangResearchQueuedAt < cooldown) return 0;
+    const perDayMax = Math.max(1, Math.min(50, Number(cfg.slang?.researchPerDayMax) || 10));
+    const today = new Date().toISOString().slice(0, 10);
+    if (slangResearchDay.key !== today) slangResearchDay = { key: today, count: 0 };
+    const remaining = perDayMax - slangResearchDay.count;
+    if (remaining <= 0) return 0;
+
+    const known = new Set(slangEntries.map((e) => e.content));
+    const candidates = slangFilter.getCandidates(key, { topK: remaining, exclude: [...known] });
+    if (!candidates.length) return 0;
+
+    const created = [];
+    for (const item of candidates) {
+      const entry = createSlangEntry({
+        content: item.term,
+        source: 'ai',
+        status: SLANG_STATUS.CANDIDATE,
+        evidence: item.samples.map((text) => ({ key, sender: '统计预筛', text: String(text ?? '').slice(0, 200), time: Date.now() })),
+      });
+      slangEntries.push(entry);
+      created.push(entry);
+    }
+    slangResearchDay.count += created.length;
+    slangResearchQueuedAt = Date.now();
+    saveSlangStore();
+    log(`黑话预筛：${key} 选出 ${created.length} 个高分候选（今日已研究 ${slangResearchDay.count}/${perDayMax}）`);
+    queueSlangTask(() => runSlangResearch(created));
+    return created.length;
+  }
+
   function maybeQueueSlangExtraction(key) {
     if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!dshReady) return;
@@ -3023,15 +3077,20 @@ async function main() {
     queueSlangTask(() => runSlangExtraction(key));
   }
 
-  // 黑话学习素材入口：群聊普通消息进入滚动窗口（命令/角色控制语不学；
-  // 只学当前消息自己的文字，不学引用原文）。一代/二代共用。
-  function feedSlangWindow(key, sender, plainContent, { isCommand = false } = {}) {
-    if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
+  // 黑话素材入口：群聊普通消息进入滚动窗口，同时喂给统计预筛。
+  // 预筛**不受 slang.learn 影响**：它纯本地计算、零 token，关掉 learn 只是关掉
+  // 「让模型去抽取/研究」，不应该连本地统计一起停掉——否则候选池永远是空的。
+  function feedSlangWindow(key, sender, plainContent, { isCommand = false, userId = '' } = {}) {
+    if (cfg.slang?.enabled === false) return;
     if (!key || !plainContent || typeof plainContent !== 'string') return;
     const text = plainContent.trim();
     // isCommand 覆盖 "@机器人 /命令"：这类前缀让 startsWith 判不出来，但同样不该学。
     if (!text || isCommand || text.startsWith('/')) return;
     if (/进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(text)) return;
+    slangFilter.updateFromMessage(text, key, userId || sender);
+    // 预筛驱动的研究：即使 learn=false 也能跑（它不依赖旧 extractor）。
+    queueResearchFromFilter(key);
+    if (cfg.slang?.learn !== true) return;
     if (!slangWindows.has(key)) slangWindows.set(key, []);
     const win = slangWindows.get(key);
     win.push({ sender: String(sender || '未知'), text: truncateText(text, 200), time: Date.now() });
@@ -3083,18 +3142,24 @@ async function main() {
       .map(publicSlangEntry);
   }
 
+  /**
+   * 时间行放在前面，黑话块放到正文**之后**。
+   *
+   * 为什么不把黑话拼在前面：前缀每轮都在变，会把 prompt 前缀缓存整段打掉。
+   * 时间行是唯一的稳定前缀（精确到分钟），黑话属于"这段对话特有的补充"，
+   * 应该跟正文一起走尾部，位置更接近它实际影响的范围。
+   */
   function withSlangContext(promptText) {
     const now = new Date();
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
-    const parts = [timeLine];
-    if (cfg.slang?.enabled !== false) {
-      const slText = String(promptText || '');
-      const relevant = slangEntries.filter((e) => e && e.status === SLANG_STATUS.CONFIRMED
-        && e.content && e.meaning && slText.includes(String(e.content)));
-      const block = relevant.length ? buildSlangContext(relevant, cfg.slang?.injectMax ?? 8) : '';
-      if (block) parts.push(block);
-    }
-    return parts.join('\n\n') + '\n\n' + promptText;
+    const head = `${timeLine}\n\n${promptText}`;
+    if (cfg.slang?.enabled === false) return head;
+    const slText = String(promptText || '');
+    const relevant = slangEntries.filter((e) => e && e.status === SLANG_STATUS.CONFIRMED
+      && e.content && e.meaning && slText.includes(String(e.content)));
+    if (!relevant.length) return head;
+    const block = buildSlangContext(relevant, cfg.slang?.injectMax ?? 8);
+    return block ? `${head}\n\n${block}` : head;
   }
 
   // 身份对齐置顶：只对群聊注入（私聊不需要，也避免把群成员映射带进私聊）。
@@ -8239,6 +8304,10 @@ async function main() {
           const token = String(body.token ?? '').trim();
           const content = redactKnownTokensOnly(String(body.content ?? '')).trim();
           const context = redactKnownTokensOnly(String(body.context ?? '')).trim();
+          const meaning = redactKnownTokensOnly(String(body.meaning ?? '')).trim();
+          const usage = redactKnownTokensOnly(String(body.usage ?? '')).trim();
+          const example = redactKnownTokensOnly(String(body.example ?? '')).trim();
+          const confidence = String(body.confidence ?? '').trim().toLowerCase();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
@@ -8247,6 +8316,26 @@ async function main() {
           if (!content) { sendJson({ ok: false, error: 'content 不能为空' }, 400); return; }
           if (content.length > 50) { sendJson({ ok: false, error: '黑话词条过长（最多 50 字）' }, 400); return; }
           if (!allowSlangSubmit(key)) { sendJson({ ok: false, error: '黑话提交过于频繁，请稍后再试' }, 429); return; }
+          if (meaning.length > SLANG_FIELD_MAX_LEN) {
+            sendJson({
+              ok: false, code: 'meaning-too-long',
+              error: `meaning 过长（${meaning.length} 字，最多 ${SLANG_FIELD_MAX_LEN} 字）`,
+              hint: '压缩到 120 字以内的简明释义；宁可短于准确，也不要截断语义',
+            }, 400);
+            return;
+          }
+          if (confidence && confidence !== 'high' && confidence !== 'low') {
+            sendJson({
+              ok: false, code: 'invalid-confidence',
+              error: `confidence 只能是 high 或 low，收到「${confidence}」`,
+              hint: '有把握就传 high（或不传），没把握传 low 让它留在候选池',
+            }, 400);
+            return;
+          }
+          // 准入契约：带 meaning 且不自评 low 的，直接视为已确认。
+          // 这是「不想人工批准」的落地方式——AI 想让它生效，就必须自己给出词义。
+          const autoConfirm = Boolean(meaning) && confidence !== 'low';
+          const targetStatus = autoConfirm ? SLANG_STATUS.CONFIRMED : SLANG_STATUS.CANDIDATE;
           const existing = slangEntries.find((e) => e.content === content);
           if (existing) {
             if (existing.status === SLANG_STATUS.CONFIRMED) {
@@ -8257,37 +8346,52 @@ async function main() {
               sendJson({ ok: false, error: '该词已被管理员拒绝，如需重新收录请联系管理员' }, 403);
               return;
             }
-            // candidate：累计出现次数并追加语境证据
+            // 已存在：累计频次与证据；若这次带了 meaning，就地把候选升级为已确认。
             existing.count = (Number(existing.count) || 0) + 1;
             if (context) {
               existing.evidence = mergeEvidence(existing.evidence, [{ key, sender: 'AI提交', text: context.slice(0, 200), time: Date.now() }]);
             }
-            existing.updatedAt = new Date().toISOString();
+            if (meaning) {
+              existing.meaning = meaning;
+              if (usage) existing.usage = usage;
+              if (example) existing.example = example;
+              existing.updatedAt = new Date().toISOString();
+              if (autoConfirm) {
+                existing.status = SLANG_STATUS.CONFIRMED;
+                existing.lastInferenceCount = existing.count;
+              }
+            }
             saveSlangStore();
-            if (cfg.slang?.autoResearch !== false) {
+            // 只有仍是候选、且预筛认可时才排队研究；已确认的不再重复花钱。
+            if (existing.status === SLANG_STATUS.CANDIDATE && cfg.slang?.autoResearch !== false) {
               const thresholds = Array.isArray(cfg.slang?.inferenceThresholds) ? cfg.slang.inferenceThresholds.map(Number).filter(Boolean) : [2, 4, 8];
               if (thresholds.includes(existing.count) && existing.count > (Number(existing.lastInferenceCount) || 0)) {
                 queueSlangTask(() => runSlangResearch([existing]));
               }
             }
-            log(`[reserved2] AI 再次提交黑话候选「${content}」(${key})，累计 ${existing.count} 次`);
-            sendJson({ ok: true, duplicate: true, status: 'candidate', entry: publicSlangEntry(existing) });
+            log(`[reserved2] AI 再次提交黑话「${content}」(${key})，累计 ${existing.count} 次，状态 ${existing.status}`);
+            sendJson({ ok: true, duplicate: true, status: existing.status, entry: publicSlangEntry(existing) });
             return;
           }
           const entry = createSlangEntry({
             content,
+            meaning,
+            usage,
+            example,
             source: 'ai',
-            status: SLANG_STATUS.CANDIDATE,
+            status: targetStatus,
             evidence: context ? [{ key, sender: 'AI提交', text: context.slice(0, 200), time: Date.now() }] : []
           });
+          if (autoConfirm) entry.lastInferenceCount = entry.count;
           slangEntries.push(entry);
           saveSlangStore();
-          if (cfg.slang?.autoResearch !== false) {
+          // 带 meaning 直接确认的词不再走研究：研究是给"说不清含义"的候选兜底的。
+          if (!autoConfirm && cfg.slang?.autoResearch !== false) {
             queueSlangTask(() => runSlangResearch([entry]));
           }
-          log(`[reserved2] AI 提交黑话候选「${content}」(${key})`);
-          appendActivity(`${key} [reserved2] AI 提交黑话候选：${content}${context ? '（附语境）' : ''}`);
-          sendJson({ ok: true, entry: publicSlangEntry(entry) });
+          log(`[reserved2] AI 提交黑话「${content}」(${key})，状态 ${entry.status}`);
+          appendActivity(`${key} [reserved2] AI 提交黑话：${content}（${entry.status}）`);
+          sendJson({ ok: true, status: entry.status, entry: publicSlangEntry(entry) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/authorize/read') {
@@ -14440,7 +14544,7 @@ async function main() {
       const sender = displayName;
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
-      if (kind === 'group') feedSlangWindow(key, sender, plainContent, { isCommand: command.isCommand || command.droppedBare });
+      if (kind === 'group') feedSlangWindow(key, sender, plainContent, { isCommand: command.isCommand || command.droppedBare, userId: String(event.user_id ?? '') });
       if (socialV2.paused) {
         appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
         return;
@@ -14497,7 +14601,7 @@ async function main() {
 
     // 黑话学习素材：只从群聊普通消息进入滚动窗口（命令/角色控制语不学；只学当前消息自己的文字，不学引用原文）
     if (kind === 'group') {
-      feedSlangWindow(key, event.sender?.card || event.sender?.nickname || String(event.user_id), plainContent, { isCommand: command.isCommand || command.droppedBare });
+      feedSlangWindow(key, event.sender?.card || event.sender?.nickname || String(event.user_id), plainContent, { isCommand: command.isCommand || command.droppedBare, userId: String(event.user_id ?? '') });
     }
 
     // 鱼群保护：chat / reserved 模式也走同一套判定（reserved2 在下面的分支里单独拦）。
