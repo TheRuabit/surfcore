@@ -2901,3 +2901,17 @@ Node 读文件后删除；不再解析 stdout。所有「浏览…」共用此�
 - **修法**：在 harness 顶部 `import * as commandText from '../src/command-text.js'` 并加进 spread 列表。
 - **教训**：**新增 `src/*.js` 被 bridge import 时，必须同步 harness**，否则"本地能跑、审计全红"。
   排查方法：拿基线提交建 `git worktree`，同一批测试跑两遍做对照，别靠猜。
+
+
+## 命令回复绕过了内容审计，路径被发进 QQ（2026-11-06）
+
+- **现象**：私聊 `/插件状态` 回复 `example 插件运行中；数据目录：E:\DSH\...\state\command-plugins\example`，
+  本机绝对路径直接出现在聊天里。
+- **根因**：`sendCommandReply` 只用 `redactKnownTokensOnly`（精确名单抹令牌），**没跑 `SENSITIVE_RE`**；
+  而 AI 回复走 `auditAndSend` → `shouldAuditKey` + `SENSITIVE_RE`。两套通道，闸门不一样。
+  示例插件又把 `api.dataDir` 拼进了回复文本。
+- **修法**：① 示例插件去掉路径回显；② `sendCommandReply` 加
+  `if (text && SENSITIVE_RE.test(text)) throw`，命中即整条阻止，日志记 `reply-error`。
+- **教训**：**新增任何出站通道，都要先问"它过不过审计"**。命令插件是第二条发文通道，
+  但它写的人可能是任意第三方插件作者；闸门必须建在桥接侧，不能指望插件自觉。
+  另外 QQ 是公共通道，**路径/凭据类的"调试信息"默认就不该发出去**，要看去设置页。

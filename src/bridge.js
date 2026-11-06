@@ -9064,6 +9064,11 @@ async function main() {
       segments.push({ type: 'at', data: { qq: at } });
     }
     const text = redactKnownTokensOnly(String(result.text ?? '')).slice(0, 500);
+    // QQ 是公共通道：命令回复同样过内容审计（本机路径/凭据）。与 AI 回复的闸门保持一致，
+    // 否则任何插件都能借 /命令 把 C:\Users\... 发出去。
+    if (text && SENSITIVE_RE.test(text)) {
+      throw new Error('命令回复包含疑似敏感信息（路径/凭据），已阻止发送');
+    }
     if (text) segments.push({ type: 'text', data: { text: escapeCqText(text) } });
     const image = String(result.image ?? '').trim();
     if (image) {

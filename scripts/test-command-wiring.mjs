@@ -90,3 +90,20 @@ test('接线：日志轮转不重置 seq 水位', () => {
   assert.ok(!/seq = 0/.test(body), '轮转仍把 seq 归零');
   assert.match(log, /saveSeq\(\)/);
 });
+test('接线：命令回复过内容审计，示例插件不回显本机路径', () => {
+  const bridge = read('src/bridge.js');
+  const fn = bridge.slice(bridge.indexOf('async function sendCommandReply'));
+  const body = fn.slice(0, fn.indexOf('function readArchiveActiveMembers'));
+  assert.match(body, /SENSITIVE_RE\.test\(text\)/, '命令回复没有走敏感信息审计');
+
+  const example = read('plugins/surfcore/command-plugins/example/index.js');
+  assert.ok(!example.includes('数据目录：'), '示例插件仍在向 QQ 回显数据目录');
+  assert.match(example, /example 插件运行中。/);
+});
+
+test('审计：示例插件旧回复里的本机路径确实会被拦', async () => {
+  const { SENSITIVE_RE } = await import('../src/sensitive.js');
+  assert.equal(SENSITIVE_RE.test('example 插件运行中；数据目录：E:\\DSH\\DSHWorkingDir\\state\\x'), true);
+  assert.equal(SENSITIVE_RE.test('接口正常：I love you'), false);
+  assert.equal(SENSITIVE_RE.test('example 插件运行中。'), false);
+});

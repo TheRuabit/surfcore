@@ -23,7 +23,9 @@ export async function activate(api) {
     scopes: ['group', 'private'],
     description: '查看示例插件状态（仅管理员）',
     async handler() {
-      return { text: `example 插件运行中；数据目录：${api.dataDir}` };
+      // 不回显 api.dataDir：QQ 是公共通道，本机绝对路径属于敏感信息。
+      // 要看路径去设置 → Log Terminal 的插件卡片。
+      return { text: 'example 插件运行中。' };
     },
   });
 }

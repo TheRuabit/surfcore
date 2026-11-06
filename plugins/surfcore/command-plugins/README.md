@@ -72,6 +72,17 @@ export async function activate(api) {
 - `atUserId` 禁止 `all`
 - `silent` 只记日志，不回复
 
+### 回复内容会被审计
+
+命令回复与 AI 回复走同一道内容闸门：命中 `SENSITIVE_RE`（本机路径 `C:\...`、
+`/home/...`、`token=...` 等）**整条阻止发送**，日志记 `error / reply-error`。
+
+因此：
+
+- **不要**把 `api.dataDir`、配置路径、令牌写进 `text`
+- 需要给管理员看路径时，去设置页的插件卡片（`dataDir` 字段），不要发到 QQ
+- QQ 是公共通道，群友和别的 bot 都看得到
+
 ## 命令触发规则（2026-11-06 起）
 
 | 场景 | 是否执行 | 说明 |
