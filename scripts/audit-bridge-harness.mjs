@@ -36,6 +36,8 @@ import * as historyCatchup from '../src/history-catchup.js';
 import * as purposeEngine from '../src/purpose-engine.js';
 import * as conversationClosure from '../src/conversation-closure.js';
 import * as reminderScheduler from '../src/reminder-scheduler.js';
+import * as commandText from '../src/command-text.js';
+import * as dayKey from '../src/day-key.js';
 import * as commandHost from '../src/command-host.js';
 import * as commandLog from '../src/command-log.js';
 import * as sharedStore from '../src/shared-store.js';
@@ -251,6 +253,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...purposeEngine,
     ...conversationClosure,
     ...reminderScheduler,
+    ...commandText,
+    ...dayKey,
     ...commandHost,
     ...commandLog,
     ...sharedStore,

@@ -96,14 +96,17 @@ test('宿主：启用/用户命令/管理员命令/异常/禁用', async () => {
   await host.close();
 });
 
-test('宿主：未知命令不匹配，限流只日志', async () => {
+test('宿主：未知命令留痕，限流只日志', async () => {
   const { builtin, commandLog, host, replies } = makeHost({ ratePerMinute: 1 });
   writePlugin(path.join(builtin, 'demo'), 'demo', PLUGIN);
   await host.load();
   await host.setEnabled('demo', true);
 
+  // 未注册的斜杠命令必须 matched:true：否则桥接会把它当普通消息投给 DSH。
   let result = await host.dispatch(ctx({ raw: '/不存在' }));
-  assert.equal(result.matched, false);
+  assert.equal(result.matched, true);
+  assert.equal(result.outcome, 'unknown');
+  assert.equal(replies.length, 0);
 
   result = await host.dispatch(ctx({ raw: '/回声 1' }));
   assert.equal(result.outcome, 'ok');
@@ -168,5 +171,111 @@ test('宿主：重复 id / 路径穿越拒绝加载', async () => {
   assert.ok(listed.errors.some((item) => item.error === 'duplicate-id'));
   assert.ok(listed.errors.some((item) => /不能跳出/.test(item.error)));
   assert.equal(listed.plugins.find((p) => p.id === 'escape'), undefined);
+  await host.close();
+});
+const PLUGIN_SCOPED = `
+export async function activate(api) {
+  api.commands.register({ name: '仅群', aliases: ['grouponly'], permission: 'user', scopes: ['group'], handler: async () => ({ text: 'group-ok' }) });
+  api.commands.register({ name: '仅私聊', aliases: ['privateonly'], permission: 'user', scopes: ['private'], handler: async () => ({ text: 'private-ok' }) });
+}
+`;
+
+test('宿主：scopes 生效，不匹配只记日志不回 QQ', async () => {
+  const { builtin, commandLog, host, replies } = makeHost();
+  writePlugin(path.join(builtin, 'scoped'), 'scoped', PLUGIN_SCOPED);
+  await host.load();
+  await host.setEnabled('scoped', true);
+
+  let result = await host.dispatch(ctx({ raw: '/仅群' }));
+  assert.equal(result.outcome, 'ok');
+  assert.equal(replies.length, 1);
+
+  result = await host.dispatch(ctx({ raw: '/仅群', kind: 'private', key: 'private:2' }));
+  assert.equal(result.outcome, 'denied');
+  assert.equal(commandLog.tail().entries.at(-1).code, 'scope-mismatch');
+  assert.equal(replies.length, 1);
+
+  result = await host.dispatch(ctx({ raw: '/仅私聊' }));
+  assert.equal(result.outcome, 'denied');
+  assert.equal(commandLog.tail().entries.at(-1).code, 'scope-mismatch');
+  assert.equal(replies.length, 1);
+
+  result = await host.dispatch(ctx({ raw: '/仅私聊', kind: 'private', key: 'private:2' }));
+  assert.equal(result.outcome, 'ok');
+  assert.equal(replies.length, 2);
+  await host.close();
+});
+
+test('宿主：未知命令写日志并标记 matched（不进 DSH）', async () => {
+  const { builtin, commandLog, host, replies } = makeHost();
+  writePlugin(path.join(builtin, 'demo'), 'demo', PLUGIN);
+  await host.load();
+  await host.setEnabled('demo', true);
+
+  const result = await host.dispatch(ctx({ raw: '/不存在的命令' }));
+  assert.equal(result.matched, true);
+  assert.equal(result.outcome, 'unknown');
+  assert.equal(result.code, 'unknown-command');
+  const entry = commandLog.tail().entries.at(-1);
+  assert.equal(entry.outcome, 'unknown');
+  assert.equal(entry.code, 'unknown-command');
+  assert.ok(entry.hint, 'unknown 必须带 hint');
+  assert.equal(replies.length, 0);
+  await host.close();
+});
+
+test('宿主：慢插件超时，记 plugin-timeout 且不回 QQ', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'slow-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'slow'), 'slow', `
+export async function activate(api) {
+  api.commands.register({ name: '慢', permission: 'user', handler: async () => { await new Promise((r) => setTimeout(r, 3000)); return { text: 'late' }; } });
+}
+`);
+  const commandLog = createCommandLog({ file: path.join(dir, 'log.jsonl') });
+  const replies = [];
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    commandLog,
+    sendReply: async (key, result) => { replies.push([key, result]); },
+    handlerTimeoutMs: 600,
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('slow', true);
+  const result = await host.dispatch(ctx({ raw: '/慢' }));
+  assert.equal(result.outcome, 'error');
+  assert.equal(commandLog.tail().entries.at(-1).code, 'plugin-timeout');
+  assert.ok(commandLog.tail().entries.at(-1).hint);
+  assert.equal(replies.length, 0);
+  await host.close();
+});
+
+test('宿主：激活失败的插件不会把 enabled=true 落盘', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'broken-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'broken'), 'broken', 'export async function activate() { throw new Error("激活失败"); }');
+  const stateFile = path.join(dir, 'plugins.json');
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile,
+    dataRoot: path.join(dir, 'data'),
+    sendReply: async () => {},
+    log: () => {},
+  });
+  await host.load();
+  await assert.rejects(() => host.setEnabled('broken', true), /激活失败/);
+  // 激活失败时状态文件可能压根没生成；只要存在就不能留下 enabled:true。
+  if (fs.existsSync(stateFile)) {
+    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    assert.notEqual(saved.enabled?.broken, true, '激活失败却把 enabled=true 写进了状态文件');
+  }
+  const item = host.list().plugins.find((p) => p.id === 'broken');
+  assert.equal(item.loaded, false);
+  assert.equal(item.enabled, false, '激活失败的插件不该显示为已启用');
   await host.close();
 });

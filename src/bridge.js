@@ -35,6 +35,7 @@ import { synthesizeToFile } from './voice-tts.js';
 import { classifyVoiceError, pickFallbackRoute } from './voice-diagnostics.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
+import { leadingSelfAtCount, resolveCommandText } from './command-text.js';
 import { buildProvenanceBlock, buildSelfIdentityBlock, selfIdentityPath } from './self-identity.js';
 import {
   GREETING_RETRY_MS, buildMorningGreetingPrompt, localDateKey, parseGreetingTime,
@@ -3024,11 +3025,12 @@ async function main() {
 
   // 黑话学习素材入口：群聊普通消息进入滚动窗口（命令/角色控制语不学；
   // 只学当前消息自己的文字，不学引用原文）。一代/二代共用。
-  function feedSlangWindow(key, sender, plainContent) {
+  function feedSlangWindow(key, sender, plainContent, { isCommand = false } = {}) {
     if (cfg.slang?.enabled === false || cfg.slang?.learn === false) return;
     if (!key || !plainContent || typeof plainContent !== 'string') return;
     const text = plainContent.trim();
-    if (!text || text.startsWith('/')) return;
+    // isCommand 覆盖 "@机器人 /命令"：这类前缀让 startsWith 判不出来，但同样不该学。
+    if (!text || isCommand || text.startsWith('/')) return;
     if (/进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(text)) return;
     if (!slangWindows.has(key)) slangWindows.set(key, []);
     const win = slangWindows.get(key);
@@ -9023,8 +9025,8 @@ async function main() {
     return body.data;
   }
 
-  // 直接发任意 OneBot 消息段（卡片/分享卡用）。文本发送仍走 sendToQQ，
-  // 这样限速、审计和会话守卫不被绕过。
+  // 直接发任意 OneBot 消息段（卡片/分享卡/命令回复用）。走这里会跳过 sendToQQ 的分条、
+  // 静默守卫和 fish window；调用方负责先做 token 脱敏与权限判断。
   async function onebotSendSegments(kind, id, segments) {
     if (!Array.isArray(segments) || !segments.length) throw new Error('消息段为空');
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
@@ -9069,7 +9071,11 @@ async function main() {
       segments.push({ type: 'image', data: { file: image } });
     }
     if (!segments.length) return { ok: true, empty: true };
+    // 命令回复绕开了 sendToQQ 的发送链，这里补最小守卫：会话/模式变了就取消发送。
+    const assertSendAllowed = captureSendGuard(key);
+    assertSendAllowed();
     await onebotSendSegments(kind, Number(id), segments);
+    if (Number(cfg.sendDelayMs) > 0) await sleep(Number(cfg.sendDelayMs));
     return { ok: true };
   }
 
@@ -14081,10 +14087,11 @@ async function main() {
   //   · 主人消息：全部记（私聊/群聊都记；scope 在插件侧固定为 qq，不会带去 B站）。
   //   · 群友消息：只记直接对她说、引用她、或明显有情绪/约定/道歉的，避免把整个群搬进记忆。
   //   · 私聊（非主人）：白名单好友的长消息记一条低权重的，短寒暄不记。
-  function recordMemoryInboxEvent({ key: conversationKey, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf }) {
+  function recordMemoryInboxEvent({ key: conversationKey, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf, isCommand = false }) {
     try {
       const text = String(plainContent || textContent || '').trim();
-      if (!text || text.startsWith('/')) return;
+      // 命令（含 "@机器人 /命令"）不进记忆：前缀被 @ 挡住时 startsWith 判不出来，必须用解析结果。
+      if (!text || isCommand || text.startsWith('/')) return;
       if (/^\[(图片|表情|转发消息|拍一拍)\]/.test(text)) return;
       const direct = quoteTargetIsSelf || isOwner || isDirectAddress(text, event, kind);
       if (!isOwner) {
@@ -14153,6 +14160,18 @@ async function main() {
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
+    // 命令判定：群内必须 @机器人（剥掉前导自我@段再判），裸 "/" 丢弃；私聊不需要 @。
+    // 用段切分而不是剥字符串：@ 后渲染的是群名片，和机器人昵称未必同名。
+    const selfAt = leadingSelfAtCount(event.message ?? [], selfUserId);
+    const commandTail = selfAt.count > 0
+      ? await segmentsToText((event.message ?? []).slice(selfAt.end), { resolveAtName, includeReply: false })
+      : plainContent;
+    const command = resolveCommandText({
+      plainContent,
+      tailContent: commandTail,
+      hadAtPrefix: selfAt.count > 0,
+      kind,
+    });
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
@@ -14202,7 +14221,7 @@ async function main() {
       ? (event.sender?.card || event.sender?.nickname || String(event.user_id))
       : '私聊';
     // 记忆卡原料：在静默/审批/命令等分支之前记录，避免「主人说的话没进记忆」。
-    recordMemoryInboxEvent({ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf });
+    recordMemoryInboxEvent({ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf, isCommand: command.isCommand || command.droppedBare });
     if (kind === 'group') {
       recordFishWindow(key, displayName, event.user_id, { isOwner });
     }
@@ -14229,11 +14248,9 @@ async function main() {
       });
     }
 
-    // 静默模式：群友消息不投递给 agent（只记录）；管理员消息照常
-    if (roleState.mode === 'silent' && !isOwner) {
-      if (String(plainContent).startsWith('/')) {
-        logBridgeCommand({ key, event, plainContent, displayName, outcome: 'silent', code: 'silent-mode', hint: '静默模式忽略群友命令；失败只记日志，不回 QQ' });
-      }
+    // 静默模式：群友消息不投递给 agent（只记录）；管理员消息照常。
+    // 命令不受静默影响：命令不产生模型回合、不花 token，静默期照常执行（Q4）。
+    if (roleState.mode === 'silent' && !isOwner && !command.isCommand && !command.droppedBare) {
       appendActivity(`${key}（静默模式）群友 ${event.user_id}：${textContent.slice(0, 80)}`);
       log(`静默模式，忽略群友消息 ${key}`);
       return;
@@ -14245,12 +14262,26 @@ async function main() {
       return;
     }
 
-    // 命令：先交给本地命令插件；未命中再走桥接内置管理命令。
+    // 命令：群内必须 "@机器人 /命令"；裸 "/" 丢弃并留痕，不投给 DSH。
     // 失败（权限/未知/禁用/异常/限流）只写入 Log Terminal，不回 QQ。
-    if (plainContent.startsWith('/')) {
-      const atTargets = (event.message ?? [])
+    if (command.droppedBare) {
+      logBridgeCommand({
+        key, event, plainContent, displayName,
+        outcome: 'dropped', code: 'bare-slash',
+        hint: '群内命令必须以 @机器人 开头；裸斜杠不执行、不进 DSH',
+      });
+      return;
+    }
+    if (command.isCommand) {
+      const commandText = command.commandText;
+      const atTargets = await Promise.all((event.message ?? [])
         .filter((seg) => seg?.type === 'at' && String(seg?.data?.qq ?? '') !== 'all')
-        .map((seg) => ({ qq: String(seg.data.qq), name: String(seg.data.name ?? '') }));
+        .map(async (seg) => {
+          const qq = String(seg.data.qq);
+          let name = String(seg?.data?.name ?? '');
+          if (!name) { try { name = String(await resolveGroupMemberName(id, qq) ?? ''); } catch { name = ''; } }
+          return { qq, name };
+        }));
       const dispatched = await commandHost.dispatch({
         key,
         kind,
@@ -14259,12 +14290,14 @@ async function main() {
         senderName: displayName,
         isOwner,
         messageId: String(event.message_id ?? event.msg_id ?? ''),
-        raw: plainContent,
+        raw: commandText,
+        plain: plainContent,
+        hadAtPrefix: command.hadAtPrefix,
         atTargets,
       });
       if (dispatched.matched) return;
       if (!isOwner) {
-        if (/^\/role\b/.test(plainContent)) {
+        if (/^\/role\b/.test(commandText)) {
           auditOwner('role.switch', {
             actor: auditActor(event.user_id, false),
             rule: 'ownerQQ',
@@ -14274,7 +14307,7 @@ async function main() {
             ref: { session: key },
           });
         }
-        const builtin = /^\/(?:reset|new|status|role|silent|quiet|active|speak)\b/.test(plainContent);
+        const builtin = /^\/(?:reset|new|status|role|silent|quiet|active|speak)\b/.test(commandText);
         logBridgeCommand({
           key, event, plainContent, displayName,
           outcome: 'denied',
@@ -14284,7 +14317,7 @@ async function main() {
         return;
       }
       const startedAt = Date.now();
-      if (plainContent === '/reset' || plainContent === '/new') {
+      if (commandText === '/reset' || commandText === '/new') {
         const old = state.sessions[key];
         if (old) {
           sessionEpoch++;
@@ -14338,14 +14371,14 @@ async function main() {
         logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: Boolean(old), durationMs: Date.now() - startedAt });
         return;
       }
-      if (plainContent === '/status') {
+      if (commandText === '/status') {
         const rs = readRoleState();
         await sendToQQ(key, `会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfg) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
         logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
-      if (plainContent === '/role' || plainContent.startsWith('/role ')) {
-        const name = sanitizeRoleName(plainContent.slice(5).trim());
+      if (commandText === '/role' || commandText.startsWith('/role ')) {
+        const name = sanitizeRoleName(commandText.slice(5).trim());
         if (!name || name === 'off' || name === 'clear') {
           writeRoleState(null, roleState.mode);
           auditOwner('role.switch', {
@@ -14373,20 +14406,25 @@ async function main() {
         logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
-      if (plainContent === '/silent' || plainContent === '/quiet') {
+      if (commandText === '/silent' || commandText === '/quiet') {
         writeRoleState(roleState.role, 'silent');
         await sendToQQ(key, '已进入静默模式：群友消息不再回复，仅管理员可对话。');
         logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
-      if (plainContent === '/active' || plainContent === '/speak') {
+      if (commandText === '/active' || commandText === '/speak') {
         writeRoleState(roleState.role, 'active');
         await sendToQQ(key, '已退出静默模式，恢复正常回复。');
         logBridgeCommand({ key, event, plainContent, displayName, outcome: 'ok', reply: true, durationMs: Date.now() - startedAt });
         return;
       }
-      // 其余 / 开头内容照常发给 DSH（DSH 的斜杠命令原样执行，如 /model）
-      logBridgeCommand({ key, event, plainContent, displayName, outcome: 'forwarded', code: 'forwarded-dsh', hint: '由 DSH 解释；失败详情看 DSH', durationMs: Date.now() - startedAt });
+      // 聊天不驱动 DSH 斜杠命令：未注册的命令到此为止，只留痕（Q9）。
+      logBridgeCommand({
+        key, event, plainContent, displayName,
+        outcome: 'dropped', code: 'unknown-slash',
+        hint: '未注册的命令；聊天不转发 DSH 斜杠命令', durationMs: Date.now() - startedAt,
+      });
+      return;
     }
 
     // 二代仿真模式（reserved2）：唤醒调度
@@ -14397,7 +14435,7 @@ async function main() {
       const sender = displayName;
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
-      if (kind === 'group') feedSlangWindow(key, sender, plainContent);
+      if (kind === 'group') feedSlangWindow(key, sender, plainContent, { isCommand: command.isCommand || command.droppedBare });
       if (socialV2.paused) {
         appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
         return;
@@ -14454,7 +14492,7 @@ async function main() {
 
     // 黑话学习素材：只从群聊普通消息进入滚动窗口（命令/角色控制语不学；只学当前消息自己的文字，不学引用原文）
     if (kind === 'group') {
-      feedSlangWindow(key, event.sender?.card || event.sender?.nickname || String(event.user_id), plainContent);
+      feedSlangWindow(key, event.sender?.card || event.sender?.nickname || String(event.user_id), plainContent, { isCommand: command.isCommand || command.droppedBare });
     }
 
     // 鱼群保护：chat / reserved 模式也走同一套判定（reserved2 在下面的分支里单独拦）。
@@ -14546,7 +14584,7 @@ async function main() {
 
     // 合体插件：只把“真正进入正常处理的群消息”写进公开 feed。
     // 私信、命令、静默模式、审批回答都不会到这里；后续的隐私过滤在插件侧完成。
-    if (kind === 'group' && plainContent && !plainContent.startsWith('/')) {
+    if (kind === 'group' && plainContent && !command.isCommand && !command.droppedBare) {
       appendPublicFeed({
         groupId: String(event.group_id ?? id),
         senderId: String(event.user_id ?? ''),

@@ -38,3 +38,55 @@ test('接线：示例插件 manifest 默认关闭且只声明 qq.command', () =>
   assert.match(code, /name: '回声'/);
   assert.match(code, /permission: 'admin'/);
 });
+test('接线：群内命令必须 @机器人，裸斜杠丢弃且不转发 DSH', () => {
+  const bridge = read('src/bridge.js');
+  assert.match(bridge, /import \{ leadingSelfAtCount, resolveCommandText \} from '\.\/command-text\.js'/);
+  assert.match(bridge, /leadingSelfAtCount\(event\.message/, '没有按消息段切前缀');
+  assert.match(bridge, /resolveCommandText\(/);
+  assert.match(bridge, /command\.droppedBare/);
+  assert.match(bridge, /code: 'bare-slash'/);
+  // 聊天不再驱动 DSH 斜杠命令
+  assert.ok(!bridge.includes("code: 'forwarded-dsh'"), 'QQ→DSH 斜杠转发没删干净');
+  assert.match(bridge, /code: 'unknown-slash'/);
+});
+
+test('接线：命令不再污染记忆卡 / 黑话 / 公开流', () => {
+  const bridge = read('src/bridge.js');
+  assert.match(bridge, /recordMemoryInboxEvent\(\{[\s\S]{0,200}?isCommand: command\.isCommand \|\| command\.droppedBare/);
+  assert.match(bridge, /if \(!text \|\| isCommand \|\| text\.startsWith\('\/'\)\) return;/);
+  assert.match(bridge, /feedSlangWindow\(key, sender, plainContent, \{ isCommand:/);
+  assert.match(bridge, /!command\.isCommand && !command\.droppedBare/);
+});
+
+test('接线：静默模式放行命令（不产生模型回合）', () => {
+  const bridge = read('src/bridge.js');
+  assert.match(bridge, /roleState\.mode === 'silent' && !isOwner && !command\.isCommand && !command\.droppedBare/);
+});
+
+test('接线：命令回复不再绕过发送守卫', () => {
+  const bridge = read('src/bridge.js');
+  const fn = bridge.slice(bridge.indexOf('async function sendCommandReply'));
+  const body = fn.slice(0, fn.indexOf('\n  function readArchiveActiveMembers'));
+  assert.match(body, /captureSendGuard\(key\)/, 'sendCommandReply 没有会话守卫');
+  assert.ok(!/文本发送仍走 sendToQQ/.test(bridge), '误导性注释还在');
+});
+
+test('接线：宿主检查 scopes 并有处理超时', () => {
+  const host = read('src/command-host.js');
+  assert.match(host, /scope-mismatch/);
+  assert.match(host, /plugin-timeout/);
+  assert.match(host, /handlerTimeoutMs/);
+  assert.match(host, /outcome: 'unknown'/);
+  // 激活失败不得先落盘
+  const setEnabled = host.slice(host.indexOf('async function setEnabled'));
+  const body = setEnabled.slice(0, setEnabled.indexOf('function setConfig'));
+  assert.ok(body.indexOf('activate(manifest)') < body.indexOf('state.enabled[id] = true'), 'setEnabled 仍先落盘再激活');
+});
+
+test('接线：日志轮转不重置 seq 水位', () => {
+  const log = read('src/command-log.js');
+  const rotate = log.slice(log.indexOf('function rotate()'));
+  const body = rotate.slice(0, rotate.indexOf('function append'));
+  assert.ok(!/seq = 0/.test(body), '轮转仍把 seq 归零');
+  assert.match(log, /saveSeq\(\)/);
+});

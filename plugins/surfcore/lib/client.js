@@ -4373,7 +4373,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           await api("/commands/plugins", { method: "POST", body: { action: "toggle", id, enabled } });
           toast(enabled ? "✓ 插件已启用" : "✓ 插件已停用");
           await load();
-        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+        } catch (e) { toast(`✗ ${e.message}${e.hint ? `；${e.hint}` : ""}`); } finally { setBusy(""); }
       };
       const reloadPlugin = async (id) => {
         setBusy("cmd-reload-" + id);
@@ -4381,7 +4381,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           await api("/commands/plugins", { method: "POST", body: { action: "reload", id } });
           toast("✓ 插件已重载");
           await load();
-        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+        } catch (e) { toast(`✗ ${e.message}${e.hint ? `；${e.hint}` : ""}`); } finally { setBusy(""); }
       };
       const saveConfig = async (id) => {
         setBusy("cmd-cfg-" + id);
@@ -4390,12 +4390,12 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           await api("/commands/plugins", { method: "POST", body: { action: "config", id, config: parsed } });
           toast("✓ 插件配置已保存");
           await load();
-        } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+        } catch (e) { toast(`✗ ${e.message}${e.hint ? `；${e.hint}` : ""}`); } finally { setBusy(""); }
       };
       const clearLog = async () => {
         setBusy("cmd-clear");
         try { await api("/commands/log/clear", { method: "POST", body: {} }); toast("✓ 日志已备份并清空"); await load(); }
-        catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
+        catch (e) { toast(`✗ ${e.message}${e.hint ? `；${e.hint}` : ""}`); } finally { setBusy(""); }
       };
       const entries = logs?.entries ?? [];
       return h("div", null,

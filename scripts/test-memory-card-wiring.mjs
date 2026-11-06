@@ -17,7 +17,9 @@ const store = read('plugins/surfcore/lib/store.js');
 
 // 1) 桥接：消息进来写 inbox；QQ 提示词两条路径都注入记忆卡；有容量告警私聊端点。
 assert.match(bridge, /appendMemoryInboxEvent\(MEMORY_CARD_PATHS/, '桥接没有把消息写入记忆卡 inbox');
-assert.match(bridge, /recordMemoryInboxEvent\(\{ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf \}\)/, '桥接没有在 handleIncoming 里记录记忆');
+assert.match(bridge, /recordMemoryInboxEvent\(\{ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf, isCommand: [^}]+\}\)/, '桥接没有在 handleIncoming 里记录记忆');
+// 命令（含 "@机器人 /命令"）必须被排除在记忆卡之外，否则抽卡记录会被 AI 记住。
+assert.match(bridge, /if \(!text \|\| isCommand \|\| text\.startsWith\('\/'\)\) return;/, '命令仍会写进记忆卡');
 assert.match(bridge, /recordSelfMemoryEvent\(key, sent\.join\('\\n'\)\)/, 'v2 发送没有记录她自己的发言');
 assert.match(bridge, /recordSelfMemoryEvent\(key, text\)/, 'v1 发送没有记录她自己的发言');
 assert.match(bridge, /isSelf: true/, '桥接 inbox 自发言没有 isSelf 标记');

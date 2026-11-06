@@ -45,6 +45,8 @@ export function createCommandLog({
   const limitBytes = Math.max(64 * 1024, Math.min(20 * 1024 * 1024, Number(maxBytes) || 1_000_000));
   const safe = typeof sanitize === 'function' ? sanitize : defaultSanitize;
 
+  const seqFile = `${resolved}.seq`;
+
   let count = 0;
   let seq = 0;
   try {
@@ -52,6 +54,18 @@ export function createCommandLog({
     count = existing.length;
     seq = existing.reduce((max, item) => Math.max(max, Number(item?.seq) || 0), 0);
   } catch { /* 首次运行 */ }
+  // 轮转/清空会丢掉旧行，seq 只从当前文件恢复会回退；侧车文件记住水位。
+  try {
+    const saved = Number(fs.readFileSync(seqFile, 'utf8').trim());
+    if (Number.isFinite(saved) && saved > seq) seq = saved;
+  } catch { /* 首次运行没有侧车 */ }
+
+  function saveSeq() {
+    try {
+      fs.mkdirSync(path.dirname(seqFile), { recursive: true });
+      fs.writeFileSync(seqFile, String(seq), 'utf8');
+    } catch { /* 侧车失败只影响水位，不阻塞日志 */ }
+  }
 
   function ensureDir() {
     try { fs.mkdirSync(path.dirname(resolved), { recursive: true }); } catch { /* ignore */ }
@@ -62,7 +76,8 @@ export function createCommandLog({
       if (fs.existsSync(resolved)) fs.copyFileSync(resolved, `${resolved}.1`);
       fs.writeFileSync(resolved, '', 'utf8');
       count = 0;
-      seq = 0;
+      // seq 不归零：它是 Log Terminal 的增量水位（tail({since})），归零会让前端重复读到旧行。
+      // 轮转只丢弃最旧的记录，编号必须继续递增。
     } catch (error) {
       log(`[command-log] 轮转失败：${String(error?.message ?? error)}`);
     }
@@ -94,6 +109,7 @@ export function createCommandLog({
     try {
       fs.appendFileSync(resolved, `${JSON.stringify(next)}\n`, 'utf8');
       count += 1;
+      saveSeq();
     } catch (error) {
       log(`[command-log] 写入失败：${String(error?.message ?? error)}`);
     }

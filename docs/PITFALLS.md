@@ -2878,3 +2878,26 @@ Node 读文件后删除；不再解析 stdout。所有「浏览…」共用此�
 - **修法**（0.7.17）：先查 `api/tags` 取版本；下载走 `codeload` 直连 + 归档/镜像回退；非 semver 目标阻止；
   下载类失败 30 分钟退避。
 - **教训**：版本发现、下载、退避是三件独立的事；查版本要多源（api/302/codeload），别押一个域名。
+
+## 群内斜杠命令被前导 @ 吃掉（2026-11-06）
+
+- **现象**：群友发 `@机器人 /reset`、`@机器人 /今日老婆`，命令毫无反应；日志里连"未知命令"都没有。
+- **根因**：命令判定是 `plainContent.startsWith('/')`，而 `plainContent` 由 `segmentsToText` 渲染，
+  开头的 at 段会变成 `@群名片`。**实测归档 3513 行：裸 `/xxx` 0 条，`@机器人 /xxx` 10 条** ——
+  也就是说按旧判据，真实用法的命中率是 0。
+- **为什么按字符串剥也不行**：`@` 后面是**群名片**，和机器人账号昵称未必同名（`@寻玉型大肥鱼` vs `deepseek`）。
+  必须按消息段切，只认 `seg.data.qq === selfUserId`。
+- **修法**：`src/command-text.js` 的 `leadingSelfAtCount` + `resolveCommandText`；
+  裸斜杠丢弃并记 `dropped/bare-slash`（当普通消息会进 DSH、烧 token）。
+- **教训**：**凡是"按渲染后的文本做判定"，都要先问一句"这个文本里混进了什么"**。
+  同理，`recordMemoryInboxEvent` / `feedSlangWindow` / `appendPublicFeed` 三处都有同一个漏。
+- **连带**：`atTargets[].name` 依赖 `seg.data.name`，而上游只保证 `qq`；必须用群成员表补。
+
+## 测试沙箱要手动登记新模块（2026-11-06）
+
+- **现象**：改了 `bridge.js` 之后，`test-blacklist` 等 vm 载入型测试全崩：`leadingSelfAtCount is not defined`。
+- **根因**：`scripts/audit-bridge-harness.mjs` 用 `vm` 执行 `bridge.js`，模块命名空间是**手工拼的**
+  （`...markdown, ...sensitive, ...forward, ...`）。新 import 不登记，名就是 undefined。
+- **修法**：在 harness 顶部 `import * as commandText from '../src/command-text.js'` 并加进 spread 列表。
+- **教训**：**新增 `src/*.js` 被 bridge import 时，必须同步 harness**，否则"本地能跑、审计全红"。
+  排查方法：拿基线提交建 `git worktree`，同一批测试跑两遍做对照，别靠猜。

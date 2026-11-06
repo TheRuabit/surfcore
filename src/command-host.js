@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 const ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const RESERVED = new Set(['reset', 'new', 'status', 'role', 'silent', 'quiet', 'active', 'speak']);
 const DEFAULT_RATE_PER_MINUTE = 30;
+const DEFAULT_HANDLER_TIMEOUT_MS = 5000;
 
 function text(value, max = 200) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -90,6 +91,7 @@ export function createCommandHost({
   activeMembers = async () => [],
   now = Date.now,
   ratePerMinute = DEFAULT_RATE_PER_MINUTE,
+  handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
 } = {}) {
   if (!stateFile) throw new Error('command-host 需要 stateFile');
   if (!dataRoot) throw new Error('command-host 需要 dataRoot');
@@ -97,6 +99,7 @@ export function createCommandHost({
   const root = path.resolve(dataRoot);
   const pluginDirs = dirs.map((dir) => path.resolve(dir));
   const perMinute = Math.max(1, Math.min(300, Number(ratePerMinute) || DEFAULT_RATE_PER_MINUTE));
+  const handlerMs = Math.max(500, Math.min(60_000, Number(handlerTimeoutMs) || DEFAULT_HANDLER_TIMEOUT_MS));
 
   let state = readState();
   const active = new Map();   // id -> { manifest, commands: Map(normalized -> spec), dispose }
@@ -347,12 +350,16 @@ export function createCommandHost({
     const { plugins } = discover();
     const manifest = plugins.find((item) => item.id === id && !item.error);
     if (!manifest) throw new Error(`插件不存在或不可用：${id}`);
-    state.enabled[id] = enabled === true;
-    saveState();
     if (enabled === true) {
+      // 先激活再落盘：激活失败时状态文件不能留下 enabled:true，否则 UI 显示"已启用/未加载"，
+      // 重启后反复失败，且用户无法通过停用按钮恢复到干净状态。
       const result = await activate(manifest);
       if (!result.ok) throw new Error(result.error);
+      state.enabled[id] = true;
+      saveState();
     } else {
+      state.enabled[id] = false;
+      saveState();
       await deactivate(id);
     }
     return list();
@@ -403,7 +410,18 @@ export function createCommandHost({
     const key = normalizeName(first);
     if (!key) return { matched: false };
     const hit = known.get(key);
-    if (!hit) return { matched: false };
+    if (!hit) {
+      // 斜杠命令未注册：留痕，让 Log Terminal 能看到谁发了什么、为什么没执行。
+      logEntry({
+        ctx: { ...ctx, raw },
+        spec: null,
+        pluginId: '',
+        outcome: 'unknown',
+        code: 'unknown-command',
+        hint: '未注册的命令；在设置 → Log Terminal 查看已启用插件',
+      });
+      return { matched: true, outcome: 'unknown', code: 'unknown-command' };
+    }
     const { spec, pluginId, manifest } = hit;
     const started = now();
     const commandCtx = {
@@ -414,6 +432,12 @@ export function createCommandHost({
       args: raw.slice(1).trim().slice(first.length).trim(),
       raw,
     };
+    const scopes = Array.isArray(spec.scopes) && spec.scopes.length ? spec.scopes : ['group', 'private'];
+    const scope = ctx.kind === 'private' ? 'private' : 'group';
+    if (!scopes.includes(scope)) {
+      logEntry({ ctx: commandCtx, spec, pluginId, outcome: 'denied', code: 'scope-mismatch', hint: `命令只在这些场景可用：${scopes.join('/')}` });
+      return { matched: true, outcome: 'denied', command: spec.name, plugin: pluginId };
+    }
     if (spec.permission === 'admin' && ctx.isOwner !== true) {
       logEntry({ ctx: commandCtx, spec, pluginId, outcome: 'denied', code: 'not-owner', hint: '仅管理员可用；群友失败只记日志，不回 QQ' });
       return { matched: true, outcome: 'denied', command: spec.name, plugin: pluginId };
@@ -427,7 +451,14 @@ export function createCommandHost({
       return { matched: true, outcome: 'rate-limited', command: spec.name, plugin: pluginId };
     }
     try {
-      const result = await spec.handler(commandCtx, commandCtx.args);
+      // 超时保护：命令挂在入站主链上，慢插件会卡住整个会话。
+      const result = await Promise.race([
+        Promise.resolve().then(() => spec.handler(commandCtx, commandCtx.args)),
+        new Promise((_, reject) => {
+          const timer = setTimeout(() => reject(Object.assign(new Error('插件处理超时'), { code: 'plugin-timeout' })), handlerMs);
+          if (typeof timer.unref === 'function') timer.unref();
+        }),
+      ]);
       const silent = result == null || result === false || result?.silent === true;
       let replied = false;
       if (!silent) {
@@ -442,13 +473,16 @@ export function createCommandHost({
       logEntry({ ctx: commandCtx, spec, pluginId, outcome: 'ok', code: '', hint: '', reply: replied, durationMs: now() - started });
       return { matched: true, outcome: 'ok', command: spec.name, plugin: pluginId, reply: replied };
     } catch (error) {
+      const timedOut = error?.code === 'plugin-timeout';
       logEntry({
         ctx: commandCtx,
         spec,
         pluginId,
         outcome: 'error',
-        code: 'plugin-error',
-        hint: '查看 bridge.log 的插件堆栈；修正后重载插件',
+        code: timedOut ? 'plugin-timeout' : 'plugin-error',
+        hint: timedOut
+          ? `插件处理超过 ${handlerMs}ms；查插件里的同步 IO 或外部请求`
+          : '查看 bridge.log 的插件堆栈；修正后重载插件',
         durationMs: now() - started,
         message: text(error?.message ?? error, 300),
       });
