@@ -1,5 +1,11 @@
 // 群报长图模板（报纸版式）。数据由 render.js 以 JSON 注入。
-#let data = json("data.json")
+#let raw = json("data.json")
+// 新字段用默认值兜底：老缓存/旧 data.json 不应该让整个渲染失败。
+#let data = raw
+#let topicsOf = if "topics" in raw { raw.topics } else { () }
+#let titlesOf = if "titles" in raw { raw.titles } else { () }
+#let ghostOf = if "ghost" in raw { raw.ghost } else { () }
+#let verdictOf = if "verdict" in raw { raw.verdict } else { "" }
 
 #let c-bg      = rgb("#eef2f8")
 #let c-paper   = rgb("#ffffff")
@@ -94,8 +100,26 @@
             #box(width: (r.count / mx2 * 100%), height: 4pt, radius: 2pt, fill: c-accent)
           ]
         ],
-        text(size: 8.5pt, weight: "bold", font: "Raleway", str(r.count)),
       )
+    ]
+    #if titlesOf.len() > 0 [
+      #gap(9)
+      #card[
+        #sectionbar("05", "群友称号", str(titlesOf.len()) + " 人")
+        #gap(6)
+        #for (ti, tt) in titlesOf.enumerate() [
+          #if ti > 0 { gap(5); line(length: 100%, stroke: 0.4pt + c-line); gap(5) }
+          #grid(columns: (1fr, auto), gutter: 8pt, align: (left + horizon, right + horizon),
+            block[
+              #text(size: 8.5pt, weight: "bold", tt.name)
+              #gap(2)
+              #text(size: 8pt, fill: c-muted, tt.reason)
+            ],
+            box(fill: c-accent2.transparentize(62%), inset: (x: 6pt, y: 2pt), radius: 4pt,
+              text(size: 8pt, weight: "bold", fill: c-accent, tt.title)),
+          )
+        ]
+      ]
     ]
   ]
 ]
@@ -113,16 +137,50 @@
         #text(size: 7.5pt, fill: c-muted, "—— " + q.name)
       ]
     ]
+    #if ghostOf.len() > 0 [
+      #gap(10)
+      #line(length: 100%, stroke: 0.4pt + c-line)
+      #gap(8)
+      #text(size: 11pt, weight: "bold", "👻 夺舍榜")
+      #gap(6)
+      #for (gi, g) in ghostOf.enumerate() [
+        #if gi > 0 { gap(5) }
+        #block(inset: (left: 9pt), stroke: (left: 2pt + c-accent2))[
+          #text(size: 8.5pt, weight: "bold", g.name)
+          #gap(2)
+          #text(size: 7.5pt, fill: c-muted, g.reason)
+        ]
+      ]
+    ]
   ]
 ]
 
 #grid(columns: (1.15fr, 1fr), gutter: 11pt, leftCol, rightCol)
 
+// ── 今日话题（全宽，LLM）──
+#if topicsOf.len() > 0 [
+  #gap(12)
+  #card[
+    #sectionbar("04", "今日话题", str(topicsOf.len()) + " 个")
+    #gap(7)
+    #grid(columns: (1fr, 1fr), gutter: 10pt,
+      ..topicsOf.map(item => block[
+        #grid(columns: (auto, 1fr), gutter: 7pt, align: (left + horizon, left + horizon),
+          box(width: 5pt, height: 5pt, radius: 3pt, fill: c-accent),
+          text(size: 9pt, weight: "bold", item.title),
+        )
+        #gap(2)
+        #text(size: 7.5pt, fill: c-muted, item.who)
+      ]),
+    )
+  ]
+]
+
 // ── 复读榜（全宽）──
 #if data.repeats.len() > 0 [
   #gap(12)
   #card[
-    #sectionbar("04", "复读榜", str(data.repeats.len()) + " 组")
+    #sectionbar("06", "复读榜", str(data.repeats.len()) + " 组")
     #gap(7)
     #for (i, r) in data.repeats.enumerate() [
       #if i > 0 { gap(6) }
@@ -132,6 +190,21 @@
         text(size: 9pt, r.text),
       )
     ]
+  ]
+]
+
+// ── 群锐评（全宽）──
+#if verdictOf != "" [
+  #gap(12)
+  #block(width: 100%, fill: c-paper, radius: 12pt, inset: 16pt, stroke: 0.5pt + c-line)[
+    #grid(columns: (auto, 1fr), gutter: 12pt, align: (left + horizon, left + horizon),
+      text(size: 26pt, fill: c-accent2, "“"),
+      block[
+        #text(size: 11pt, weight: "bold", verdictOf)
+        #gap(3)
+        #text(size: 7pt, fill: c-muted, "本日群锐评 · 由模型生成"),
+      ],
+    )
   ]
 ]
 

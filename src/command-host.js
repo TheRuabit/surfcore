@@ -92,6 +92,7 @@ export function createCommandHost({
   readMessages = null,
   readMembers = null,
   readGroupName = null,
+  analyze = null,
   now = Date.now,
   ratePerMinute = DEFAULT_RATE_PER_MINUTE,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
@@ -103,6 +104,8 @@ export function createCommandHost({
   const pluginDirs = dirs.map((dir) => path.resolve(dir));
   const perMinute = Math.max(1, Math.min(300, Number(ratePerMinute) || DEFAULT_RATE_PER_MINUTE));
   const handlerMs = Math.max(500, Math.min(60_000, Number(handlerTimeoutMs) || DEFAULT_HANDLER_TIMEOUT_MS));
+
+  let analyzeBusy = false;
 
   let state = readState();
   const active = new Map();   // id -> { manifest, commands: Map(normalized -> spec), dispose }
@@ -221,6 +224,21 @@ export function createCommandHost({
             log(`[ext:${manifest.id}] activeMembers 失败：${text(error?.message ?? error)}`);
             return [];
           }
+        },
+        // 内部模型分析：会花 token。并发限 1，避免连点把额度烧完。
+        analyze: async ({ prompt, timeoutMs } = {}) => {
+          if (typeof analyze !== 'function') {
+            return { ok: false, code: 'not-supported', error: '宿主未提供分析能力', hint: '升级 SurfCore 或检查桥接版本' };
+          }
+          if (analyzeBusy) return { ok: false, code: 'busy', error: '已有分析在进行', hint: '等上一次跑完再试' };
+          analyzeBusy = true;
+          try {
+            return await analyze({ prompt: String(prompt ?? ''), timeoutMs });
+          } catch (error) {
+            const message = text(error?.message ?? error, 300);
+            log(`[ext:${manifest.id}] analyze 失败：${message}`);
+            return { ok: false, code: 'analyze-failed', error: message, hint: '看 bridge.log' };
+          } finally { analyzeBusy = false; }
         },
         // 群名：报告标题用。拿不到就返回结构化失败，插件自己决定退化文案。
         groupName: async ({ key, ttlMs } = {}) => {

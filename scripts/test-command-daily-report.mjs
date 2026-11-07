@@ -173,3 +173,38 @@ test('插件：群报设置可读可写（仅管理员）', async () => {
   assert.match(String(replies.at(-1).text), /已更新/);
   await host.close();
 });
+test('插件：没有 analyze 接口时降级到统计版', async () => {
+  const { host, replies } = makeHost();
+  await host.load();
+  await host.setEnabled('daily-report', true);
+  // 切到真实发送模式，走渲染分支
+  await host.setConfig('daily-report', { previewOnly: false, renderImage: true });
+  const r = await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
+  assert.equal(r.outcome, 'ok');
+  assert.ok(replies.length >= 1, '应该回话');
+  await host.close();
+});
+
+test('插件：预览模式不调用 analyze（不烧 token）', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'noanalysis-'));
+  let called = 0;
+  const replies = [];
+  const host = createCommandHost({
+    dirs: [PLUGIN_DIR],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    sendReply: async (key, result) => { replies.push(result); },
+    readMessages: async ({ since, until }) => ({ ok: true, messages: SAMPLE.filter((m) => m.at >= since && m.at < until), total: 1, truncated: false }),
+    readMembers: async () => ({ ok: true, members: [], cached: false }),
+    readGroupName: async () => ({ ok: true, name: '测试群', cached: false }),
+    analyze: async () => { called += 1; return { ok: true, text: '{}' }; },
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('daily-report', true);
+  // 默认 previewOnly: true
+  await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
+  assert.equal(called, 0, '预览模式不该调用 analyze');
+  assert.ok(replies.length >= 1);
+  await host.close();
+});

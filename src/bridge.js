@@ -1838,6 +1838,9 @@ async function main() {
   const feedbackTimes = new Map();      // key -> [timestamp]：AI 反馈限频（内存态）
   const slangResearchingIds = new Set(); // 正在研究中的候选 id，防止重复排队
   const learnerSessions = new Set();    // sessionId -> 学习会话（不映射 QQ，不发送）
+  // 群报分析会话：与黑话学习分开，避免两套 prompt 互相污染上下文。
+  let reportSessionId = null;
+  const REPORT_SESSION_FILE = path.join(STATE_DIR, 'report-session.json');
   const learnerCollectors = new Map();  // sessionId -> turn collector
   const learnerWaiters = new Map();     // sessionId -> [{resolve,reject,timer}]
   let slangLearnerSessionId = null;
@@ -2903,6 +2906,93 @@ async function main() {
       learnerSessions.delete(oldId);
     }
     try { fs.unlinkSync(SLANG_SESSION_FILE); } catch {}
+  }
+
+  /**
+   * 群报分析专用会话（与黑话学习分开）。
+   *
+   * 复用 learnerSessions 的「只收集不发送到 QQ」语义：它只是一组 sessionId，
+   * 事件循环看到就会走收集分支，不区分用途。
+   */
+  async function ensureReportSession() {
+    const preset = resolvePresetName(cfg.agentPreset, { strict: true });
+    if (!preset) throw new Error('群报分析缺少已验证的安全 preset，拒绝创建会话');
+    if (reportSessionId) {
+      learnerSessions.add(reportSessionId);
+      api.events.follow(reportSessionId);
+      return reportSessionId;
+    }
+    const saved = readJsonSafe(REPORT_SESSION_FILE, null);
+    if (saved?.sessionId && saved.preset === preset) {
+      const candidate = String(saved.sessionId);
+      const applied = await ensureChatModel(candidate);
+      if (applied === 'not-found') {
+        log(`群报分析会话 ${candidate} 在 DSH 侧已不存在，重建`);
+        try { fs.unlinkSync(REPORT_SESSION_FILE); } catch {}
+      } else {
+        reportSessionId = candidate;
+        learnerSessions.add(reportSessionId);
+        api.events.follow(reportSessionId);
+        return reportSessionId;
+      }
+    }
+    const dir = path.join(STATE_DIR, 'report-agent');
+    fs.mkdirSync(dir, { recursive: true });
+    const wsValue = unwrap(await api.workspace.create({ path: dir }), 'report workspace.create');
+    if (wsValue.created) {
+      try { await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: 'QQ 群报分析' }); } catch {}
+    }
+    const params = { workspaceId: wsValue.workspace.workspaceId, agentPreset: preset };
+    const value = unwrap(await api.sessions.create(params), 'report session.create');
+    reportSessionId = value.sessionId;
+    learnerSessions.add(reportSessionId);
+    api.events.follow(reportSessionId);
+    await ensureChatModel(reportSessionId);
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    atomicWriteJson(REPORT_SESSION_FILE, { sessionId: reportSessionId, preset });
+    log(`群报分析会话已创建：${reportSessionId}`);
+    return reportSessionId;
+  }
+
+  /** 供插件调用的内部模型分析。失败一律返回结构化错误，不抛。 */
+  async function runInternalAnalysis({ prompt, timeoutMs = 120000 } = {}) {
+    const body = String(prompt ?? '').trim();
+    if (!body) return { ok: false, code: 'empty-prompt', error: 'prompt 不能为空', hint: '检查调用方' };
+    if (body.length > 8000) return { ok: false, code: 'prompt-too-long', error: `prompt ${body.length} 字符超过上限 8000`, hint: '减少采样消息数' };
+    if (!dshReady) return { ok: false, code: 'dsh-unavailable', error: 'DSH 未就绪', hint: '等 DSH 启动完成再试' };
+    if (learnerBudgetBlock()) {
+      return { ok: false, code: 'budget-blocked', error: 'Token 额度不足', hint: '在「Token 额度」页调整或明天再试' };
+    }
+    const started = Date.now();
+    let sessionId;
+    try {
+      sessionId = await ensureReportSession();
+    } catch (error) {
+      return { ok: false, code: 'session-failed', error: String(error?.message ?? error), hint: '看 bridge.log 的会话创建步骤' };
+    }
+    try {
+      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: body }] });
+      if (!accepted.result.ok) {
+        const code = String(accepted.result.error?.code ?? '');
+        const message = String(accepted.result.error?.message ?? '');
+        if (/not[- ]?found/i.test(`${code} ${message}`)) {
+          reportSessionId = null;
+          try { fs.unlinkSync(REPORT_SESSION_FILE); } catch {}
+        }
+        return { ok: false, code: 'prompt-rejected', error: `${code}: ${message}`, hint: '检查 preset 与模型是否可用' };
+      }
+      const text = await waitLearnerTurn(sessionId, timeoutMs);
+      return { ok: true, text, sessionId, ms: Date.now() - started };
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      const timedOut = /超时/.test(message);
+      return {
+        ok: false,
+        code: timedOut ? 'timeout' : 'turn-failed',
+        error: message,
+        hint: timedOut ? `模型 ${timeoutMs}ms 未返回，可调大 analysisTimeoutMs` : '看 bridge.log 的 turn 事件',
+      };
+    }
   }
 
   function waitLearnerTurn(sessionId, timeoutMs = 120000) {
@@ -8892,6 +8982,7 @@ async function main() {
     readMessages: readArchiveMessages,
     readMembers: readGroupMembers,
     readGroupName,
+    analyze: runInternalAnalysis,
     ratePerMinute: Number(cfg.commands?.ratePerMinute) || 30,
   });
 

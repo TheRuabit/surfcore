@@ -64,6 +64,12 @@ export function buildRenderData(agg, ctx = {}) {
     quotes,
     ranking,
     repeats,
+    // LLM 趣味内容：没有分析时给空数组，模板用 #if 保护，不占位。
+    topics: (ctx.analysis && Array.isArray(ctx.analysis.topics)) ? ctx.analysis.topics : [],
+    titles: (ctx.analysis && Array.isArray(ctx.analysis.titles)) ? ctx.analysis.titles : [],
+    ghost: (ctx.analysis && Array.isArray(ctx.analysis.ghost)) ? ctx.analysis.ghost : [],
+    hasAnalysis: Boolean(ctx.analysis && (ctx.analysis.topics?.length || ctx.analysis.titles?.length || ctx.analysis.verdict)),
+    verdict: String(ctx.analysis?.verdict ?? ''),
     footer: ctx.footer || 'SurfCore · 今日群报（统计版，未调用模型）',
   };
 }

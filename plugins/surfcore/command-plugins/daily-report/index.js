@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { aggregateMessages, renderReport } from '../../../../src/daily-report-core.js';
 import { buildRenderData, renderReportImage, resolveTypst } from './lib/render.js';
+import { buildAnalysisInput, buildAnalysisPrompt, parseAnalysisJson, normalizeAnalysis, loadCachedAnalysis, saveCachedAnalysis } from './lib/analysis.js';
 import { dayKey, msUntilNextDay } from '../../../../src/day-key.js';
 
 const DEFAULTS = {
@@ -15,6 +16,8 @@ const DEFAULTS = {
   autoReport: false,
   autoReportTime: '23:50',
   renderImage: true,
+  llmAnalysis: true,
+  analysisTimeoutMs: 120000,
   topUsers: 10,
   picks: 5,
   perUser: 1,
@@ -106,11 +109,37 @@ async function buildReport(api, ctx, targetDay) {
   if (!text) return { ok: true, empty: true, agg, text: '' };
   const file = writeReport(api, ctx.groupId, targetDay, text);
 
+  // LLM 趣味分析：先查缓存（同一天不重复烧 token），没有才调模型。
+  // previewOnly 时一律跳过 —— 反复看样式不该花钱。
+  let analysis = null;
+  if (options.llmAnalysis !== false) {
+    analysis = loadCachedAnalysis(api.dataDir, ctx.groupId, targetDay);
+    if (analysis) {
+      api.log('群报：命中分析缓存 ' + targetDay);
+    } else if (!options.previewOnly && api.qq && api.qq.analyze) {
+      const transcript = buildAnalysisInput(read.messages ?? []);
+      if (transcript) {
+        const prompt = buildAnalysisPrompt({ groupName: groupName || '本群', dayText: formatDay(targetDay), transcript });
+        const r = await api.qq.analyze({ prompt, timeoutMs: Number(options.analysisTimeoutMs) || DEFAULTS.analysisTimeoutMs });
+        if (r && r.ok) {
+          const parsed = normalizeAnalysis(parseAnalysisJson(r.text), members);
+          if (parsed) {
+            analysis = parsed;
+            saveCachedAnalysis(api.dataDir, ctx.groupId, targetDay, parsed);
+            api.log('群报：分析完成 ' + targetDay + '，' + r.ms + 'ms');
+          } else api.log('群报：模型输出无法解析，退回统计版');
+        } else if (r) {
+          api.log('群报：分析跳过 [' + r.code + '] ' + r.error);
+        }
+      }
+    }
+  }
+
   // 长图渲染：失败不阻断文本报告，但要能在日志里看到原因。
   let image = '';
   if (options.renderImage !== false) {
     try {
-      const data = buildRenderData(agg, { groupName: groupName || '本群' });
+      const data = buildRenderData(agg, { groupName: groupName || '本群', analysis });
       const png = path.join(api.dataDir, 'renders', `group-${ctx.groupId}`, `${targetDay}.png`);
       const r = await renderReportImage(data, { outFile: png });
       if (r.ok) image = png;
