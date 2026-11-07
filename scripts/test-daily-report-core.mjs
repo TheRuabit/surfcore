@@ -26,14 +26,25 @@ test('空输入：total=0，render 返回空串（调用方据此不回话）', 
   assert.equal(renderReport(agg), '');
 });
 
-test('自己发的消息不计入', () => {
+test('自己发的消息计入统计，但不进金句', () => {
   const agg = aggregateMessages([
-    { ...msg(10, '1', '甲', '你好呀'), isSelf: false },
+    { ...msg(10, '1', '甲', '你好呀今天过得怎么样'), isSelf: false },
     { ...msg(11, '9', '我', '这是我的回复'), isSelf: true },
   ], { dayKey: '2026-11-06' });
-  assert.equal(agg.total, 1);
+  // 话痨榜要能统计她自己说了多少
+  assert.equal(agg.total, 2);
+  assert.equal(agg.users, 2);
+  // 但金句只摘群友的话
   assert.equal(agg.picks.length, 1);
   assert.equal(agg.picks[0].name, '甲');
+});
+
+test('includeSelf=false 时自己完全不计入', () => {
+  const agg = aggregateMessages([
+    { ...msg(10, '1', '甲', '你好呀今天过得怎么样'), isSelf: false },
+    { ...msg(11, '9', '我', '这是我的回复'), isSelf: true },
+  ], { dayKey: '2026-11-06', includeSelf: false });
+  assert.equal(agg.total, 1);
 });
 
 test('每用户保底采样：三人各 3 条，perUser=2 时每人最多 2 条', () => {
@@ -97,7 +108,8 @@ test('渲染：包含日期/条数/人数/精选', () => {
 test('规范化：markdown @mention 的 mqqapi 链接被剥掉', () => {
   const raw = '@甜心信仰酱(超鬼王特供版)[@甜心信仰酱(超鬼王特供版)](mqqapi://markdown/mention?at_type=1&at_tinyid=378) 在吗';
   const out = normalizeText(raw);
-  assert.equal(out, '@甜心信仰酱(超鬼王特供版) 在吗');
+  // 前导 @ 会被剥掉：报告里不需要"在叫谁"，读者看上下文就知道
+  assert.equal(out, '甜心信仰酱(超鬼王特供版) 在吗');
   assert.ok(!out.includes('mqqapi'), '内部协议不该进报告');
 });
 

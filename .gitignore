@@ -76,3 +76,8 @@ dist/*.zip
 # 运行时安装证据（由更新流程写入安装目录，不进仓库）
 .installed-manifest.json
 .installed-meta.json
+
+# 本地调试产物（群报渲染、基准测试、ACL 诊断）
+_bench/
+_preview/
+_acl-recovery/

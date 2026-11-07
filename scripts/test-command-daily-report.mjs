@@ -88,8 +88,8 @@ test('插件：默认 previewOnly 只落盘，QQ 只回简短提示', async () =
   const result = await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
   assert.equal(result.outcome, 'ok');
   assert.equal(replies.length, 1);
-  const text = String(replies[0].text ?? '');
-  assert.match(text, /预览模式，未播报/);
+  const text = String(replies[0].text ?? replies[0].segments?.[0]?.text ?? '');
+  assert.match(text, /预览模式/);
   assert.ok(!text.includes('今日精选'), '预览模式不该把正文发出来');
 
   const reportDir = path.join(dir, 'data', 'daily-report', 'reports', 'group-999');
@@ -107,10 +107,10 @@ test('插件：日期参数（昨天 / 指定日期 / 非法）', async () => {
   await host.setEnabled('daily-report', true);
 
   await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
-  assert.match(String(replies.at(-1).text), /群报已生成/);
+  assert.match(String(replies.at(-1).text ?? replies.at(-1).segments?.[0]?.text ?? ''), /群报/);
 
   await host.dispatch(ctx({ raw: '/今日群报 昨天' }));
-  assert.match(String(replies.at(-1).text), /群报已生成/);
+  assert.match(String(replies.at(-1).text ?? replies.at(-1).segments?.[0]?.text ?? ''), /群报/);
 
   await host.dispatch(ctx({ raw: '/今日群报 不是日期' }));
   assert.match(String(replies.at(-1).text), /日期格式不对/);

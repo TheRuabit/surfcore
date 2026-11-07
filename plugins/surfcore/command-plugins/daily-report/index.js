@@ -7,15 +7,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { aggregateMessages, renderReport } from '../../../../src/daily-report-core.js';
+import { buildRenderData, renderReportImage, resolveTypst } from './lib/render.js';
 import { dayKey, msUntilNextDay } from '../../../../src/day-key.js';
 
 const DEFAULTS = {
   previewOnly: true,
   autoReport: false,
   autoReportTime: '23:50',
-  topUsers: 5,
-  picks: 12,
-  perUser: 2,
+  renderImage: true,
+  topUsers: 10,
+  picks: 5,
+  perUser: 1,
 };
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -78,8 +80,23 @@ async function buildReport(api, ctx, targetDay) {
       hint: (read && read.hint) || '检查桥接日志',
     };
   }
+  // 群名：报告标题用。拿不到就退化到「本群」，不要拿群号冒充。
+  let groupName = '';
+  if (api.qq && api.qq.groupName) {
+    const g = await api.qq.groupName({ key: ctx.key });
+    if (g && g.ok && g.name) groupName = g.name;
+  }
+
+  // 成员表：把 QQ 号映射成群名片。失败不影响主流程（退化到消息自带的 sender）。
+  let members = null;
+  if (api.qq && api.qq.members) {
+    const got = await api.qq.members({ key: ctx.key });
+    if (got && got.ok && Array.isArray(got.members)) members = got.members;
+    else if (got && got.ok === false) api.log('群报：拉群成员表失败，退化到 sender：' + String(got.error ?? ''));
+  }
   const options = cfg(api);
   const agg = aggregateMessages(read.messages ?? [], {
+    members,
     dayKey: targetDay,
     topUsers: Number(options.topUsers) || DEFAULTS.topUsers,
     picks: Number(options.picks) || DEFAULTS.picks,
@@ -88,7 +105,21 @@ async function buildReport(api, ctx, targetDay) {
   const text = renderReport(agg, { title: '今日群报' });
   if (!text) return { ok: true, empty: true, agg, text: '' };
   const file = writeReport(api, ctx.groupId, targetDay, text);
-  return { ok: true, text, file, agg };
+
+  // 长图渲染：失败不阻断文本报告，但要能在日志里看到原因。
+  let image = '';
+  if (options.renderImage !== false) {
+    try {
+      const data = buildRenderData(agg, { groupName: groupName || '本群' });
+      const png = path.join(api.dataDir, 'renders', `group-${ctx.groupId}`, `${targetDay}.png`);
+      const r = await renderReportImage(data, { outFile: png });
+      if (r.ok) image = png;
+      else api.log(`群报渲染失败 [${r.code}] ${r.error}`);
+    } catch (error) {
+      api.log('群报渲染异常：' + String(error?.message ?? error));
+    }
+  }
+  return { ok: true, text, file, image, agg };
 }
 
 export async function activate(api) {
@@ -123,10 +154,19 @@ export async function activate(api) {
         return { silent: true };
       }
       const options = cfg(api);
+      // 三明治：头部摘要 + 长图 + 尾部彩蛋。图文同条消息时，QQ 会把图压成可点开的缩略图，
+      // 群里既能看到关键数字，又不会一条长图刷满屏。
+      const head = '📊 ' + formatDay(target) + ' 群报\n共 ' + result.agg.total + ' 条 · ' + result.agg.users + ' 人';
+      const tail = options.previewOnly ? '（预览模式，图片存于本地）' : '';
       if (options.previewOnly) {
-        return {
-          text: '群报已生成：' + formatDay(target) + '，' + result.agg.total + ' 条 / ' + result.agg.users + ' 人（预览模式，未播报）',
-        };
+        return { text: head + '\n' + tail };
+      }
+      if (result.image) {
+        return { segments: [
+          { type: 'text', text: head },
+          { type: 'image', file: result.image },
+          ...(tail ? [{ type: 'text', text: tail }] : []),
+        ] };
       }
       return { text: result.text };
     },

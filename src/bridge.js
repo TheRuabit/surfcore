@@ -2804,8 +2804,33 @@ async function main() {
     const text = String(msg.plain ?? msg.text ?? '').trim();
     if (isMemoryNoiseText(text)) return;
     try {
-      store.add({ key, seq: msg.seq, messageId: msg.messageId, sender: msg.sender, userId: msg.userId, time: msg.time, replyTo: msg.quoteTargetIsSelf ? 'self' : '', type: 'message', text });
+      // isSelf 必须落盘：群报要能统计「她自己说了多少」，而检索侧要跳过这些话避免自问自答。
+      store.add({ key, seq: msg.seq, messageId: msg.messageId, sender: msg.sender, userId: msg.userId, time: msg.time, replyTo: msg.quoteTargetIsSelf ? 'self' : '', type: 'message', isSelf: msg.isSelf === true, text });
     } catch (error) { log('[记忆] 归档失败：' + String(error?.message ?? error)); }
+  }
+
+  /**
+   * 把「她自己发出去的群消息」也写进归档。
+   *
+   * 以前只有对方的消息进归档，于是群报的「话痨榜」永远缺她自己那一档；
+   * 而 recordSelfMemoryEvent 只写记忆卡 inbox，不是这个文件。
+   */
+  function archiveSelfMessage(key, textBody, messageId) {
+    if (!String(key).startsWith('group:')) return;
+    const body = String(textBody ?? '').trim();
+    if (!body) return;
+    try {
+      const st = getSocialV2State(key);
+      archiveMemory(key, {
+        seq: (st.lastUnreadSeq || 0) + 0.5,
+        messageId: messageId != null ? String(messageId) : null,
+        sender: selfNickname || '我',
+        userId: selfUserId,
+        time: Date.now(),
+        isSelf: true,
+        text: body,
+      });
+    } catch (error) { log('[记忆] 归档自己的发言失败：' + String(error?.message ?? error)); }
   }
 
   function probeMemoryShadow(key) {
@@ -8865,6 +8890,8 @@ async function main() {
     sendReply: (key, result) => sendCommandReply(key, result),
     activeMembers: readArchiveActiveMembers,
     readMessages: readArchiveMessages,
+    readMembers: readGroupMembers,
+    readGroupName,
     ratePerMinute: Number(cfg.commands?.ratePerMinute) || 30,
   });
 
@@ -9168,6 +9195,31 @@ async function main() {
       if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
       segments.push({ type: 'at', data: { qq: at } });
     }
+    // 自定义段序列：插件需要「文字 + 图片 + 文字」这种排版时用（QQ 会把图压成缩略图）。
+    // 每段的文本照旧过审计；图片只认 http(s) 或本机绝对路径。
+    if (Array.isArray(result.segments) && result.segments.length) {
+      if (result.segments.length > 6) throw new Error('命令回复最多 6 段');
+      for (const seg of result.segments) {
+        if (!seg || typeof seg !== 'object') continue;
+        if (seg.type === 'text') {
+          const t = redactKnownTokensOnly(String(seg.text ?? '')).slice(0, 500);
+          if (!t) continue;
+          if (SENSITIVE_RE.test(t)) throw new Error('命令回复包含疑似敏感信息（路径/凭据），已阻止发送');
+          segments.push({ type: 'text', data: { text: escapeCqText(t) } });
+        } else if (seg.type === 'image') {
+          const f = String(seg.file ?? '').trim();
+          if (!f) continue;
+          if (!/^https?:\/\//i.test(f) && !path.isAbsolute(f)) throw new Error('segments.image 必须是 http(s) 地址或本机绝对路径');
+          segments.push({ type: 'image', data: { file: f } });
+        }
+      }
+      if (!segments.length) return { ok: true, empty: true };
+      const assertSegOk = captureSendGuard(key);
+      assertSegOk();
+      await onebotSendSegments(kind, Number(id), segments);
+      if (Number(cfg.sendDelayMs) > 0) await sleep(Number(cfg.sendDelayMs));
+      return { ok: true };
+    }
     const text = redactKnownTokensOnly(String(result.text ?? '')).slice(0, 500);
     // QQ 是公共通道：命令回复同样过内容审计（本机路径/凭据）。与 AI 回复的闸门保持一致，
     // 否则任何插件都能借 /命令 把 C:\Users\... 发出去。
@@ -9241,6 +9293,93 @@ async function main() {
    * 这个给原文、按 since/until 绝对时间戳，且归档不可用时**明确报错**而不是返回空数组 ——
    * 归档的写入由 vectorMemory.enabled/shadow 控制，插件无法感知这个开关。
    */
+  /**
+   * 读群成员表（给需要「QQ 号 → 人名」的插件用，如群报）。
+   *
+   * 只返回展示所需的字段；is_robot 原样带出去但不承诺准确 ——
+   * 实测只有部分账号被标记，调用方应把它当成「加分项」而不是判据。
+   */
+  async function readGroupMembers({ key, ttlMs = 10 * 60 * 1000 } = {}) {
+    const conversationKey = String(key ?? '').trim();
+    if (!conversationKey.startsWith('group:')) {
+      return { ok: false, code: 'unsupported-key', error: '只支持群聊会话（group:...）', hint: '成员表只对群有意义' };
+    }
+    const groupId = conversationKey.slice('group:'.length);
+    if (!/^\d+$/.test(groupId)) {
+      return { ok: false, code: 'bad-group-id', error: '群号不合法', hint: '检查 ctx.key' };
+    }
+    const now = Date.now();
+    const cached = groupMemberListCache.get(groupId);
+    if (cached && now - cached.ts < Math.max(0, Number(ttlMs) || 0)) {
+      return { ok: true, members: cached.members, cached: true };
+    }
+    let list;
+    try {
+      list = await bot.getGroupMemberList(Number(groupId));
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'members-unavailable',
+        error: String(error?.message ?? error),
+        hint: '网关未实现 get_group_member_list，或当前不在线',
+      };
+    }
+    const raw = Array.isArray(list) ? list : (list?.data ?? []);
+    const members = raw.map((m) => ({
+      userId: String(m?.user_id ?? ''),
+      card: String(m?.card ?? ''),
+      nickname: String(m?.nickname ?? ''),
+      isRobot: m?.is_robot === true,
+      lastSentTime: Number(m?.last_sent_time) || 0,
+    })).filter((m) => m.userId);
+    if (!members.length) {
+      return { ok: false, code: 'members-empty', error: '成员表为空', hint: '网关可能返回了空列表，稍后重试' };
+    }
+    groupMemberListCache.set(groupId, { members, ts: now });
+    if (groupMemberListCache.size > 50) {
+      for (const [gid, item] of groupMemberListCache) {
+        if (now - item.ts > 30 * 60 * 1000) groupMemberListCache.delete(gid);
+      }
+    }
+    return { ok: true, members, cached: false };
+  }
+
+  const groupMemberListCache = new Map(); // groupId -> { members, ts }
+  const groupNameCache = new Map(); // groupId -> { name, ts }
+
+  /**
+   * 读群名（给报告标题用）。
+   *
+   * 先查缓存，再问网关；网关不实现 get_group_info 时回退到鱼群保护里已有的群名表。
+   * 拿不到就返回空串 —— 调用方自己决定退化文案，不要拿群号冒充群名。
+   */
+  async function readGroupName({ key, ttlMs = 30 * 60 * 1000 } = {}) {
+    const conversationKey = String(key ?? '').trim();
+    if (!conversationKey.startsWith('group:')) {
+      return { ok: false, code: 'unsupported-key', error: '只支持群聊会话（group:...）', hint: '群名只对群有意义' };
+    }
+    const groupId = conversationKey.slice('group:'.length);
+    if (!/^\d+$/.test(groupId)) {
+      return { ok: false, code: 'bad-group-id', error: '群号不合法', hint: '检查 ctx.key' };
+    }
+    const now = Date.now();
+    const cached = groupNameCache.get(groupId);
+    if (cached && now - cached.ts < Math.max(0, Number(ttlMs) || 0)) {
+      return { ok: true, name: cached.name, cached: true };
+    }
+    let name = '';
+    try {
+      const info = await bot.getGroupInfo(Number(groupId));
+      name = String(info?.group_name ?? info?.data?.group_name ?? '').trim();
+    } catch { /* 网关没实现就往下走 */ }
+    if (!name) name = String(fishGroupNames.get(groupId) ?? '').trim();
+    if (!name) {
+      return { ok: false, code: 'name-unavailable', error: '拿不到群名', hint: '网关未实现 get_group_info；可用 /群报设置 手动指定' };
+    }
+    groupNameCache.set(groupId, { name, ts: now });
+    return { ok: true, name, cached: false };
+  }
+
   function readArchiveMessages({ key, since = 0, until = Date.now(), limit = 2000, maxBytes = 4 * 1024 * 1024 } = {}) {
     const conversationKey = String(key ?? '').trim();
     if (!conversationKey.startsWith('group:')) {
@@ -9282,7 +9421,9 @@ async function main() {
       const at = Number(item?.time) || 0;
       if (at < from || at > to) continue;
       const userId = String(item?.userId ?? '').trim();
-      const isSelf = Boolean(!userId || userId === String(selfUserId) || String(item?.sender ?? '') === '我');
+      // 归档里现在会带 isSelf 标记；老数据没有这个字段，仍按「号是自己的」兜底判定。
+      const isSelf = item?.isSelf === true
+        || Boolean(!userId || userId === String(selfUserId) || String(item?.sender ?? '') === '我');
       messages.push({ at, userId, sender: String(item?.sender ?? ''), text: String(item?.text ?? ''), isSelf });
       if (messages.length >= cap) { truncated = true; break; }
     }
@@ -9843,7 +9984,11 @@ async function main() {
       return false;
     }
     await sendToQQ(key, text);
-    if (lastSendSucceeded(key)) recordSelfMemoryEvent(key, text);
+    if (lastSendSucceeded(key)) {
+      recordSelfMemoryEvent(key, text);
+      // 群报要统计「她自己说了多少」：这是唯一一处「AI 回复发出去了」的收敛点。
+      archiveSelfMessage(key, text);
+    }
     return true;
   }
 

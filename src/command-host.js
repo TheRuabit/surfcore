@@ -90,6 +90,8 @@ export function createCommandHost({
   sendReply = async () => {},
   activeMembers = async () => [],
   readMessages = null,
+  readMembers = null,
+  readGroupName = null,
   now = Date.now,
   ratePerMinute = DEFAULT_RATE_PER_MINUTE,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
@@ -218,6 +220,32 @@ export function createCommandHost({
           } catch (error) {
             log(`[ext:${manifest.id}] activeMembers 失败：${text(error?.message ?? error)}`);
             return [];
+          }
+        },
+        // 群名：报告标题用。拿不到就返回结构化失败，插件自己决定退化文案。
+        groupName: async ({ key, ttlMs } = {}) => {
+          if (typeof readGroupName !== 'function') {
+            return { ok: false, code: 'not-supported', error: '宿主未提供群名读取能力', hint: '升级 SurfCore 或检查桥接版本' };
+          }
+          try {
+            return await readGroupName({ key: String(key ?? ''), ttlMs });
+          } catch (error) {
+            const message = text(error?.message ?? error, 300);
+            log(`[ext:${manifest.id}] groupName 失败：${message}`);
+            return { ok: false, code: 'read-failed', error: message, hint: '看 bridge.log 的插件堆栈' };
+          }
+        },
+        // 群成员表：QQ 号 → 群名片/昵称。只读、带缓存、不产生模型请求。
+        members: async ({ key, ttlMs } = {}) => {
+          if (typeof readMembers !== 'function') {
+            return { ok: false, code: 'not-supported', error: '宿主未提供成员表读取能力', hint: '升级 SurfCore 或检查桥接版本' };
+          }
+          try {
+            return await readMembers({ key: String(key ?? ''), ttlMs });
+          } catch (error) {
+            const message = text(error?.message ?? error, 300);
+            log(`[ext:${manifest.id}] members 失败：${message}`);
+            return { ok: false, code: 'read-failed', error: message, hint: '看 bridge.log 的插件堆栈' };
           }
         },
         // 按绝对时间窗读原文。与 activeMembers 不同：失败时原样返回 { ok:false, code, error, hint }，
