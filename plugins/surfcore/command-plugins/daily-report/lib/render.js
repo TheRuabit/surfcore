@@ -95,11 +95,8 @@ export async function renderReportImage(data, { outFile, typstPath = '', timeout
       path.join(workDir, 'report.typ'),
       outFile,
     ];
-    // 用 spawn + stdio:'ignore'：DSH 沙箱禁止通过管道捕获子进程输出（会报 spawn EPERM）。
-    // 失败原因从 stderr 落盘文件里读，相当于自建一条不经过管道的日志通道。
-    const stderrFile = path.join(workDir, 'stderr.txt');
-    const args2 = args.slice(0, -1).concat(['--diagnostic-format', 'short', outFile]);
-    // 上面的参数改写不稳，退回原始 args；stderr 由 shell 重定向不可用，改为失败时只看退出码。
+    // 用 spawn + stdio:'ignore'：DSH 沙箱禁止通过管道捕获子进程输出（会报 spawn EPERM），
+    // 所以拿不到 stderr；失败时只能靠退出码 + 产物是否存在来判断。
     await new Promise((resolve, reject) => {
       const child = spawn(exe, args, { timeout: timeoutMs, windowsHide: true, stdio: 'ignore' });
       const timer = setTimeout(() => { try { child.kill(); } catch {} }, timeoutMs);

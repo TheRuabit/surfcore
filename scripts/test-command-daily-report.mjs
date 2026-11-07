@@ -185,7 +185,7 @@ test('插件：没有 analyze 接口时降级到统计版', async () => {
   await host.close();
 });
 
-test('插件：预览模式不调用 analyze（不烧 token）', async () => {
+test('插件：llmAnalysis=false 时不调用 analyze（省钱开关）', async () => {
   const dir = fs.mkdtempSync(path.join(root, 'noanalysis-'));
   let called = 0;
   const replies = [];
@@ -202,9 +202,10 @@ test('插件：预览模式不调用 analyze（不烧 token）', async () => {
   });
   await host.load();
   await host.setEnabled('daily-report', true);
-  // 默认 previewOnly: true
+  // 关掉分析开关
+  await host.setConfig('daily-report', { llmAnalysis: false });
   await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
-  assert.equal(called, 0, '预览模式不该调用 analyze');
+  assert.equal(called, 0, 'llmAnalysis=false 时不该调用 analyze');
   assert.ok(replies.length >= 1);
   await host.close();
 });

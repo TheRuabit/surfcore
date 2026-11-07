@@ -110,13 +110,14 @@ async function buildReport(api, ctx, targetDay) {
   const file = writeReport(api, ctx.groupId, targetDay, text);
 
   // LLM 趣味分析：先查缓存（同一天不重复烧 token），没有才调模型。
-  // previewOnly 时一律跳过 —— 反复看样式不该花钱。
+  // 与 previewOnly 解耦：预览模式只影响「发不发送」，不影响「要不要分析」——
+  // 否则没法在本地看带分析的样式。要省钱就关 llmAnalysis。
   let analysis = null;
   if (options.llmAnalysis !== false) {
     analysis = loadCachedAnalysis(api.dataDir, ctx.groupId, targetDay);
     if (analysis) {
       api.log('群报：命中分析缓存 ' + targetDay);
-    } else if (!options.previewOnly && api.qq && api.qq.analyze) {
+    } else if (api.qq && api.qq.analyze) {
       const transcript = buildAnalysisInput(read.messages ?? []);
       if (transcript) {
         const prompt = buildAnalysisPrompt({ groupName: groupName || '本群', dayText: formatDay(targetDay), transcript });

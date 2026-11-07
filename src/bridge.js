@@ -6289,6 +6289,20 @@ async function main() {
           }
           return;
         }
+        // 调试端点：直接跑一次内部模型分析，验证会话/等待链路。只对本机控制台开放。
+        if (req.method === 'POST' && url.pathname === '/api/commands/analyze') {
+          try {
+            const body = await readBody();
+            const result = await runInternalAnalysis({
+              prompt: String(body.prompt ?? ''),
+              timeoutMs: Number(body.timeoutMs) || 120000,
+            });
+            sendJson(result, result.ok ? 200 : 500);
+          } catch (error) {
+            sendJson({ ok: false, code: 'analyze-error', error: String(error?.message ?? error), hint: '看 bridge.log' }, 500);
+          }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/commands/log') {
           const result = commandLog.tail({
             limit: Number(url.searchParams.get('limit')) || 200,
