@@ -17,7 +17,7 @@
 #let c-warm    = rgb("#e8dcc8")
 
 #set page(width: 820pt, height: auto, margin: 26pt, fill: c-bg)
-#set text(font: "Noto Sans SC", size: 9.5pt, fill: c-text, lang: "zh")
+#set text(font: "Noto Sans SC", size: 10.5pt, fill: c-text, lang: "zh")
 #set par(leading: 0.66em)
 
 #let card(body) = block(width: 100%, inset: 14pt, radius: 12pt, fill: c-paper, stroke: 0.5pt + c-line, body)
@@ -25,7 +25,7 @@
 #let sectionbar(no, title, note) = block(width: 100%)[
   #grid(columns: (auto, auto, 1fr, auto), gutter: 7pt, align: (left + horizon, left + horizon, left + horizon, right + horizon),
     box(fill: c-accent, inset: (x: 5pt, y: 1pt), radius: 3pt, text(size: 7.5pt, fill: white, weight: "bold", no)),
-    text(size: 11pt, weight: "bold", title),
+    text(size: 12.5pt, weight: "bold", title),
     line(length: 100%, stroke: 0.5pt + c-line),
     if note != "" { text(size: 7.5pt, fill: c-muted, note) },
   )
@@ -33,26 +33,26 @@
 #let gap(n) = v(n * 1pt)
 
 #let stat(label, value, unit) = block(width: 100%, inset: 11pt, radius: 12pt, fill: c-paper, stroke: 0.5pt + c-line)[
-  #text(size: 7.5pt, fill: c-muted, label)
+  #text(size: 9pt, fill: c-muted, label)
   #v(2pt)
-  #text(size: 19pt, weight: "bold", font: "Raleway", value + unit)
+  #text(size: 23pt, weight: "bold", font: "Raleway", value + unit)
 ]
 
 // ── 报头：立绘直接压在纸面上，不加任何底色框 ──
 #block(width: 100%, fill: c-paper, radius: 14pt, inset: 18pt, stroke: 0.5pt + c-line)[
   #grid(columns: (1fr, 132pt), gutter: 10pt, align: (left + horizon, right + bottom),
     [
-      #text(size: 8pt, fill: c-muted, "D A I L Y   R E P O R T")
+      #text(size: 9pt, fill: c-muted, "D A I L Y   R E P O R T")
       #v(6pt)
-      #text(size: 25pt, weight: "bold", data.groupName)
+      #text(size: 32pt, weight: "bold", data.groupName)
       #v(5pt)
-      #text(size: 11.5pt, fill: c-accent, weight: "bold", "今日群报 · " + data.dateText)
+      #text(size: 13pt, fill: c-accent, weight: "bold", "今日群报 · " + data.dateText)
       #v(7pt)
       #line(length: 56%, stroke: 1.4pt + c-warm)
       #v(6pt)
-      #text(size: 8pt, fill: c-muted, data.tagline)
+      #text(size: 9pt, fill: c-muted, data.tagline)
     ],
-    image("mascot/dafeiyu-front.png", width: 100%),
+    image("mascot/pet-hero.png", width: 100%),
   )
 ]
 
@@ -94,7 +94,7 @@
       #grid(columns: (12pt, 1fr, 30pt), gutter: 6pt, align: (right + horizon, left + horizon, right + horizon),
         text(size: 8pt, fill: c-muted, str(i + 1)),
         block[
-          #text(size: 8.5pt, r.name)
+          #text(size: 9.5pt, r.name)
           #gap(1.5)
           #box(width: 100%, height: 4pt, radius: 2pt, fill: c-line)[
             #box(width: (r.count / mx2 * 100%), height: 4pt, radius: 2pt, fill: c-accent)
@@ -111,12 +111,12 @@
           #if ti > 0 { gap(5); line(length: 100%, stroke: 0.4pt + c-line); gap(5) }
           #grid(columns: (1fr, auto), gutter: 8pt, align: (left + horizon, right + horizon),
             block[
-              #text(size: 8.5pt, weight: "bold", tt.name)
+              #text(size: 9.5pt, weight: "bold", tt.name)
               #gap(2)
-              #text(size: 8pt, fill: c-muted, tt.reason)
+              #text(size: 9pt, fill: c-muted, tt.reason)
             ],
             box(fill: c-accent2.transparentize(62%), inset: (x: 6pt, y: 2pt), radius: 4pt,
-              text(size: 8pt, weight: "bold", fill: c-accent, tt.title)),
+              text(size: 9pt, weight: "bold", fill: c-accent, tt.title)),
           )
         ]
       ]
@@ -124,7 +124,7 @@
   ]
 ]
 
-// ── 右栏：金句，底部压一张大脸特写 ──
+// ── 右栏：金句 + 夺舍 + 话题 + 复读（统计块高度可预设，右栏有空间）──
 #let rightCol = [
   #card[
     #sectionbar("03", "今日金句", str(data.quotes.len()) + " 条")
@@ -132,78 +132,75 @@
     #for (i, q) in data.quotes.enumerate() [
       #if i > 0 { gap(6); line(length: 100%, stroke: 0.4pt + c-line); gap(6) }
       #block(inset: (left: 9pt), stroke: (left: 2pt + c-accent2))[
-        #text(size: 9pt, q.text)
+        #text(size: 10.5pt, q.text)
         #gap(3)
-        #text(size: 7.5pt, fill: c-muted, "—— " + q.name)
+        #text(size: 8.5pt, fill: c-muted, "—— " + q.name)
       ]
     ]
     #if ghostOf.len() > 0 [
       #gap(10)
       #line(length: 100%, stroke: 0.4pt + c-line)
       #gap(8)
-      #text(size: 11pt, weight: "bold", "👻 夺舍榜")
+      #text(size: 12pt, weight: "bold", "👻 夺舍榜")
       #gap(6)
       #for (gi, g) in ghostOf.enumerate() [
         #if gi > 0 { gap(5) }
         #block(inset: (left: 9pt), stroke: (left: 2pt + c-accent2))[
-          #text(size: 8.5pt, weight: "bold", g.name)
+          #text(size: 9.5pt, weight: "bold", g.name)
           #gap(2)
-          #text(size: 7.5pt, fill: c-muted, g.reason)
+          #text(size: 8.5pt, fill: c-muted, g.reason)
         ]
       ]
     ]
   ]
-]
-
-#grid(columns: (1.15fr, 1fr), gutter: 11pt, leftCol, rightCol)
-
-// ── 今日话题（全宽，LLM）──
-#if topicsOf.len() > 0 [
-  #gap(12)
-  #card[
-    #sectionbar("04", "今日话题", str(topicsOf.len()) + " 个")
-    #gap(7)
-    #grid(columns: (1fr, 1fr), gutter: 10pt,
-      ..topicsOf.map(item => block[
+  #if topicsOf.len() > 0 [
+    #gap(9)
+    #card[
+      #sectionbar("04", "今日话题", str(topicsOf.len()) + " 个")
+      #gap(6)
+      #for (ti, item) in topicsOf.enumerate() [
+        #if ti > 0 { gap(5) }
         #grid(columns: (auto, 1fr), gutter: 7pt, align: (left + horizon, left + horizon),
           box(width: 5pt, height: 5pt, radius: 3pt, fill: c-accent),
-          text(size: 9pt, weight: "bold", item.title),
+          block[
+            #text(size: 9.5pt, weight: "bold", item.title)
+            #gap(1.5)
+            #text(size: 8pt, fill: c-muted, item.who)
+          ],
         )
-        #gap(2)
-        #text(size: 7.5pt, fill: c-muted, item.who)
-      ]),
-    )
+      ]
+    ]
   ]
-]
-
-// ── 复读榜（全宽）──
-#if data.repeats.len() > 0 [
-  #gap(12)
-  #card[
-    #sectionbar("06", "复读榜", str(data.repeats.len()) + " 组")
-    #gap(7)
-    #for (i, r) in data.repeats.enumerate() [
-      #if i > 0 { gap(6) }
-      #grid(columns: (44pt, 1fr), gutter: 10pt, align: (left + horizon, left + horizon),
-        box(fill: c-accent2.transparentize(72%), inset: (x: 6pt, y: 2pt), radius: 4pt,
-          text(size: 9pt, weight: "bold", font: "Raleway", fill: c-accent, "×" + str(r.count))),
-        text(size: 9pt, r.text),
-      )
+  #if data.repeats.len() > 0 [
+    #gap(9)
+    #card[
+      #sectionbar("05", "复读榜", str(data.repeats.len()) + " 组")
+      #gap(6)
+      #for (ri, r) in data.repeats.enumerate() [
+        #if ri > 0 { gap(5) }
+        #grid(columns: (34pt, 1fr), gutter: 8pt, align: (left + horizon, left + horizon),
+          box(fill: c-accent2.transparentize(72%), inset: (x: 5pt, y: 1.5pt), radius: 3pt,
+            text(size: 8pt, weight: "bold", font: "Raleway", fill: c-accent, "×" + str(r.count))),
+          text(size: 9.5pt, r.text),
+        )
+      ]
     ]
   ]
 ]
+#grid(columns: (1.15fr, 1fr), gutter: 11pt, leftCol, rightCol)
 
-// ── 群锐评（全宽）──
+// ── 群锐评（全宽，右侧带表情包）──
 #if verdictOf != "" [
   #gap(12)
   #block(width: 100%, fill: c-paper, radius: 12pt, inset: 16pt, stroke: 0.5pt + c-line)[
-    #grid(columns: (auto, 1fr), gutter: 12pt, align: (left + horizon, left + horizon),
+    #grid(columns: (auto, 1fr, auto), gutter: 12pt, align: (left + horizon, left + horizon, right + horizon),
       text(size: 26pt, fill: c-accent2, "“"),
       block[
-        #text(size: 11pt, weight: "bold", verdictOf)
+        #text(size: 12.5pt, weight: "bold", verdictOf)
         #gap(3)
-        #text(size: 7pt, fill: c-muted, "本日群锐评 · 由模型生成"),
+        #text(size: 8pt, fill: c-muted, "本日群锐评 · 由模型生成"),
       ],
+      image("mascot/meme-rice.png", height: 46pt),
     )
   ]
 ]
@@ -212,7 +209,7 @@
 #gap(12)
 #block(width: 100%, fill: c-paper, radius: 10pt, inset: 10pt, stroke: 0.5pt + c-line)[
   #grid(columns: (auto, 1fr), gutter: 9pt, align: (left + horizon, left + horizon),
-    image("mascot/dafeiyu-side.png", height: 34pt),
-    text(size: 7pt, fill: c-muted, data.footer),
+    image("mascot/meme-whale.png", height: 34pt),
+    text(size: 8pt, fill: c-muted, data.footer),
   )
 ]

@@ -70,7 +70,7 @@ export function buildRenderData(agg, ctx = {}) {
     ghost: (ctx.analysis && Array.isArray(ctx.analysis.ghost)) ? ctx.analysis.ghost : [],
     hasAnalysis: Boolean(ctx.analysis && (ctx.analysis.topics?.length || ctx.analysis.titles?.length || ctx.analysis.verdict)),
     verdict: String(ctx.analysis?.verdict ?? ''),
-    footer: ctx.footer || 'SurfCore · 今日群报（统计版，未调用模型）',
+    footer: ctx.footer || '兔兔的大肥鱼 · 今日群报',
   };
 }
 
