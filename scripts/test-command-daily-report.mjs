@@ -126,14 +126,69 @@ test('插件：未来日期给出友好提示', async () => {
   await host.close();
 });
 
-test('插件：当天没消息时不发言', async () => {
+test('插件：不带日期时默认看昨天（报纸报已发生完的一天）', async () => {
+  // 钉死默认窗口：昨天 00:00 ~ 今天 00:00。看今天会让晨间报告残缺、统计值随时间漂移。
+  const seen = [];
+  const dir = fs.mkdtempSync(path.join(root, 'yday-'));
+  const host = createCommandHost({
+    dirs: [PLUGIN_DIR],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    sendReply: async () => {},
+    readMessages: async ({ since, until }) => {
+      seen.push({ since, until });
+      return { ok: true, messages: [], total: 0, truncated: false };
+    },
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('daily-report', true);
+  await host.dispatch(ctx({ raw: '/今日群报' }));
+
+  assert.equal(seen.length, 1, 'readMessages 应被调用一次');
+  const { since, until } = seen[0];
+  assert.equal(until - since, 86400000, '窗口必须正好一天');
+  const midnightToday = Date.parse(new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Hong_Kong' }) + 'T00:00:00+08:00');
+  assert.equal(until, midnightToday, '默认窗口应止于今天 00:00（即统计昨天）');
+  await host.close();
+});
+
+test('插件：显式 今天 仍然看今天', async () => {
+  const seen = [];
+  const dir = fs.mkdtempSync(path.join(root, 'today-'));
+  const host = createCommandHost({
+    dirs: [PLUGIN_DIR],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    sendReply: async () => {},
+    readMessages: async ({ since, until }) => {
+      seen.push({ since, until });
+      return { ok: true, messages: [], total: 0, truncated: false };
+    },
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('daily-report', true);
+  await host.dispatch(ctx({ raw: '/今日群报 今天' }));
+
+  assert.equal(seen.length, 1);
+  const midnightToday = Date.parse(new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Hong_Kong' }) + 'T00:00:00+08:00');
+  assert.equal(seen[0].since, midnightToday, '「今天」必须从今天 00:00 起算');
+  await host.close();
+});
+
+test('插件：当天没消息时回明确提示，而不是静默', async () => {
+  // 静默会让人分不清「这天没人说话」和「插件坏了」——命令是用户主动 @ 的，必须回话。
   const { host, replies } = makeHost({ messages: [] });
   await host.load();
   await host.setEnabled('daily-report', true);
   const result = await host.dispatch(ctx({ raw: '/今日群报 2026-11-06' }));
   assert.equal(result.outcome, 'ok');
-  assert.equal(result.reply, false);
-  assert.equal(replies.length, 0, '没消息不该回话');
+  assert.equal(result.reply, true);
+  assert.equal(replies.length, 1);
+  const text = String(replies.at(-1).text ?? '');
+  assert.match(text, /没有可统计的消息/, '必须说明是这天没数据');
+  assert.match(text, /11-06/, '必须带上问的是哪一天');
   await host.close();
 });
 

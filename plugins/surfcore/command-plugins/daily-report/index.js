@@ -156,10 +156,12 @@ export async function activate(api) {
   let timer = null;
   let stopped = false;
 
+  // 默认看**昨天**：报纸报的是已经发生完的一天。
+  // 看今天的话，早上发只有几条、报告残缺，且统计值会随时间漂移（同一天两次调用数字不一样）。
   const resolveDay = (args) => {
     const today = dayKey();
     const arg = String(args ?? '').trim();
-    if (!arg) return today;
+    if (!arg) return shiftDay(today, -1);
     if (arg === '昨天') return shiftDay(today, -1);
     if (arg === '今天') return today;
     if (DATE_RE.test(arg)) return arg;
@@ -175,17 +177,21 @@ export async function activate(api) {
     permission: 'user',
     scopes: ['group'],
     timeoutMs: declaredTimeoutMs,
-    description: '把今天的群聊聚合成日报（默认只落盘预览）',
+    description: '把某一天（默认昨天）的群聊聚合成日报',
     async handler(ctx, args) {
       const target = resolveDay(args);
       if (!target) {
-        return { text: '日期格式不对。用法：/今日群报、/今日群报 昨天、/今日群报 2026-11-05' };
+        return { text: '日期格式不对。用法：/今日群报（默认昨天）、/今日群报 今天、/今日群报 2026-11-05' };
       }
       const result = await buildReport(api, ctx, target);
       if (!result.ok) return { text: result.error + '\n' + result.hint };
+      // 空数据必须回话：命令是用户主动 @ 的，静默会让人分不清「这天没人说话」
+      // 和「插件/链路坏了」。以前的 silent:true 只在 bridge.log 留一行，人在群里看不出来。
       if (result.empty) {
-        api.log('群报 ' + target + ' 没有可统计的消息，不发言');
-        return { silent: true };
+        api.log('群报 ' + target + ' 没有可统计的消息，只回提示不渲染');
+        return {
+          text: '📊 ' + formatDay(target) + ' 群报\n这天没有可统计的消息（还没人说话，或归档里没有这个群）',
+        };
       }
       const options = cfg(api);
       // 三明治：头部摘要 + 长图 + 尾部彩蛋。图文同条消息时，QQ 会把图压成可点开的缩略图，
