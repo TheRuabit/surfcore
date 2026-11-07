@@ -105,3 +105,50 @@
 - 测试：`npm run test:commands`、`npm run test:regressions`、`npm run test:audit`。
 - 生效：重启桥接 + 设置页启用插件。
 - 验证：群里 `@鱼 /今日群报` 看到预览提示，本地报告文件有正文。
+---
+
+## 2026-11-08 追加：命令超时误杀 + 话痨榜条数回归
+
+### 现象
+
+按用户要求触发真实 `/今日群报 2026-11-07`（404 条 / 25 人）时：
+
+1. 长图里群名是「**本群**」而不是「幼儿园」，**没有锐评、没有话题/称号/夺舍榜**；
+2. 命令日志 `plugin-timeout / 插件处理超过 5000ms`，`回复条数: 0`；
+3. 几分钟后磁盘上分析缓存和长图**都生成好了** —— 说明插件跑完了，只是没人等它。
+
+### 根因（两个独立问题）
+
+**A. 测试旁路缺接口（不是插件缺陷）**
+
+`scripts/trigger-command.mjs` 只注入了 `readMessages` / `readMembers`，没注入
+`readGroupName` 和 `analyze`。插件里这两处都写了 `if (!api.qq.groupName)` 式的降级，
+于是平稳退化成「群名=本群、分析=null」，渲染成功、不报错 —— **降级路径把缺接口伪装成了正常输出**。
+补上两个注入（`analyze` 转发到桥接进程内的 `/api/commands/analyze`，因为 DSH 会话只能由桥接进程创建）。
+
+**B. 5 秒全局超时（生产真 bug）**
+
+`command-host` 的 `handlerTimeoutMs` 默认 5000ms。`Promise.race` 只放弃等待，**不取消**插件里已启动的
+异步任务 —— 所以 token 照烧、文件照写，用户什么都没收到。LLM 分析约 20s，必然触发。
+
+### 修法
+
+- `command-host.js`：`register()` 接受自报 `timeoutMs`，夹在 `[500, 180000]`；不声明走全局默认。
+- `daily-report/index.js`：声明 `analysisTimeoutMs + 30s`。
+- 超时 hint 里写**实际生效**的毫秒数。
+- `templates/report.typ`：话痨榜第三列恢复 `str(r.count)`（`9b26049` 重排版面时丢的，列宽 30pt 还在）。
+
+### 验证
+
+- `node scripts/test-command-host.mjs`：**13/13**（新增 2 条：自报超时突破默认 / 不声明仍走默认且 hint 带实际值）。
+- `npm run test:commands` 全量：**58/58**。
+- 真实触发：`outcome: ok`、`durationMs: 1302`、`reply: true`（上一次是 `5002ms / plugin-timeout`）。
+- 长图：群名「幼儿园」、夺舍榜 2 条、锐评「有人办空壳婚礼，有人发报错，这群白天全靠碎片续命」、
+  话痨榜条数 64/58/41/38/35/30/21/21/17/15。
+
+### 残余
+
+1. `autoReport` 仍不能自己发群（定时器触发时没有 `ctx.key`），只写日志。
+2. 第二条真实触发命中了分析缓存，所以 `durationMs` 只有 1302ms —— 冷启动（要调模型）的耗时
+   本轮**没有**在真实触发里复现，只有先前那次被掐断的 20s 观测。重启桥接后要再验一次。
+3. 字体 `NotoSansSC-VF.ttf` 17MB 未做子集化。

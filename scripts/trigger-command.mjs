@@ -71,6 +71,27 @@ const host = createCommandHost({
   commandLog: createCommandLog({ file: path.join(STATE_DIR, 'command-log.jsonl') }),
   sendReply: async (key, result) => { replies.push({ key, result }); },
   readMessages: readArchiveMessages,
+  readGroupName: async ({ key }) => {
+    const gid = String(key).replace(/^group:/, '');
+    let cfg; try { cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')); } catch { return { ok: false, code: 'no-config', error: '读不到 config.json', hint: '检查配置' }; }
+    const httpUrl = String(cfg?.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const tk = cfg?.snowluma?.accessToken;
+    try {
+      const r = await fetch(httpUrl + '/get_group_info', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(tk ? { authorization: 'Bearer ' + tk } : {}) },
+        body: JSON.stringify({ group_id: Number(gid) }),
+        signal: AbortSignal.timeout(20000),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (body.status !== 'ok') return { ok: false, code: 'name-unavailable', error: String(body.wording ?? r.status), hint: '网关未实现 get_group_info' };
+      const name = String(body.data?.group_name ?? '').trim();
+      if (!name) return { ok: false, code: 'name-unavailable', error: '群名为空', hint: '网关返回不含 group_name' };
+      return { ok: true, name, cached: false };
+    } catch (error) {
+      return { ok: false, code: 'name-read-failed', error: String(error?.message ?? error), hint: '检查 SnowLuma 是否在线' };
+    }
+  },
   readMembers: async ({ key }) => {
     const gid = String(key).replace(/^group:/, '');
     let cfg; try { cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')); } catch { return { ok: false, code: 'no-config', error: '读不到 config.json', hint: '检查配置' }; }
@@ -86,6 +107,27 @@ const host = createCommandHost({
     if (body.status !== 'ok') return { ok: false, code: 'members-unavailable', error: String(body.wording ?? r.status), hint: '网关未实现' };
     const list = Array.isArray(body.data) ? body.data : (body.data?.data ?? []);
     return { ok: true, members: list.map(m => ({ userId: String(m.user_id ?? ''), card: String(m.card ?? ''), nickname: String(m.nickname ?? ''), isRobot: m.is_robot === true })), cached: false };
+  },
+  // 内部模型分析必须走桥接**进程内**的会话（脚本自己起不了 DSH 会话），
+  // 所以这里转发到桥接的调试端点，复用同一个 runInternalAnalysis。
+  analyze: async ({ prompt, timeoutMs }) => {
+    let cfg; try { cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')); } catch { return { ok: false, code: 'no-config', error: '读不到 config.json', hint: '检查配置' }; }
+    const token = String(cfg?.consoleToken || '').trim();
+    if (!token) return { ok: false, code: 'no-console-token', error: 'config.json 没有 consoleToken', hint: '先启动一次桥接自动生成' };
+    const port = Number(cfg?.consolePort) || 3100;
+    try {
+      const r = await fetch('http://127.0.0.1:' + port + '/api/commands/analyze', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-console-token': token },
+        body: JSON.stringify({ prompt: String(prompt ?? ''), timeoutMs: Number(timeoutMs) || 120000 }),
+        signal: AbortSignal.timeout(Math.max(5000, Number(timeoutMs) || 120000) + 15000),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (body && body.ok === true) return body;
+      return { ok: false, code: String(body?.code || 'analyze-failed'), error: String(body?.error || ('HTTP ' + r.status)), hint: String(body?.hint || '看 bridge.log') };
+    } catch (error) {
+      return { ok: false, code: 'analyze-unreachable', error: String(error?.message ?? error), hint: '桥接控制台未启动？检查 ' + port + ' 端口' };
+    }
   },
   log: (m) => console.error('[host]', m),
 });

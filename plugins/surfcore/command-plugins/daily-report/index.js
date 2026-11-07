@@ -166,11 +166,15 @@ export async function activate(api) {
     return null;
   };
 
+  // 命令自报超时：要等模型分析（默认 120s）再渲染，宿主的 5s 默认超时必然误杀。
+  // 留 30s 余量给渲染与 IO；模型自身另有 analysisTimeoutMs 兜底，不会无限挂。
+  const declaredTimeoutMs = Math.min(180000, Math.max(5000, Number(cfg(api).analysisTimeoutMs) + 30000));
   api.commands.register({
     name: '今日群报',
     aliases: ['jrgb', '群报'],
     permission: 'user',
     scopes: ['group'],
+    timeoutMs: declaredTimeoutMs,
     description: '把今天的群聊聚合成日报（默认只落盘预览）',
     async handler(ctx, args) {
       const target = resolveDay(args);

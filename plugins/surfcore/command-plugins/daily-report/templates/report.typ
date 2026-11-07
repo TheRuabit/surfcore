@@ -100,6 +100,7 @@
             #box(width: (r.count / mx2 * 100%), height: 4pt, radius: 2pt, fill: c-accent)
           ]
         ],
+        text(size: 9.5pt, weight: "bold", font: "Raleway", str(r.count)),
       )
     ]
     #if titlesOf.len() > 0 [

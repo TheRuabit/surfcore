@@ -254,6 +254,71 @@ export async function activate(api) {
   await host.close();
 });
 
+test('宿主：命令自报 timeoutMs 可以突破全局默认，仍受硬上限约束', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'slowdecl-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'slowdecl'), 'slowdecl', `
+export async function activate(api) {
+  // 全局默认 600ms，这条自报 2500ms，应跑完而不是被误杀。
+  api.commands.register({ name: '长跑', permission: 'user', timeoutMs: 2500, handler: async () => { await new Promise((r) => setTimeout(r, 1200)); return { text: 'done' }; } });
+  // 自报超过硬上限时被夹到上限内（这里只验证不会被当成 0/infinity 而立刻超时）。
+  api.commands.register({ name: '超长声明', permission: 'user', timeoutMs: 10 * 60 * 1000, handler: async () => ({ text: 'ok' }) });
+}
+`);
+  const commandLog = createCommandLog({ file: path.join(dir, 'log.jsonl') });
+  const replies = [];
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    commandLog,
+    sendReply: async (key, result) => { replies.push([key, result]); },
+    handlerTimeoutMs: 600,
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('slowdecl', true);
+
+  const slow = await host.dispatch(ctx({ raw: '/长跑' }));
+  assert.equal(slow.outcome, 'ok', '声明了更长超时的命令不该被全局默认值误杀');
+  assert.deepEqual(replies.at(-1), ['group:1', { text: 'done' }]);
+
+  const huge = await host.dispatch(ctx({ raw: '/超长声明' }));
+  assert.equal(huge.outcome, 'ok');
+  assert.deepEqual(replies.at(-1), ['group:1', { text: 'ok' }]);
+  await host.close();
+});
+
+test('宿主：不声明 timeoutMs 的命令仍走全局默认', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'nodecl-'));
+  const builtin = path.join(dir, 'builtin');
+  fs.mkdirSync(builtin, { recursive: true });
+  writePlugin(path.join(builtin, 'nodecl'), 'nodecl', `
+export async function activate(api) {
+  api.commands.register({ name: '无声明', permission: 'user', handler: async () => { await new Promise((r) => setTimeout(r, 1500)); return { text: 'late' }; } });
+}
+`);
+  const commandLog = createCommandLog({ file: path.join(dir, 'log.jsonl') });
+  const host = createCommandHost({
+    dirs: [builtin],
+    stateFile: path.join(dir, 'plugins.json'),
+    dataRoot: path.join(dir, 'data'),
+    commandLog,
+    sendReply: async () => {},
+    handlerTimeoutMs: 600,
+    log: () => {},
+  });
+  await host.load();
+  await host.setEnabled('nodecl', true);
+  const result = await host.dispatch(ctx({ raw: '/无声明' }));
+  assert.equal(result.outcome, 'error');
+  assert.equal(commandLog.tail().entries.at(-1).code, 'plugin-timeout');
+  // 提示里必须带上**实际**生效的毫秒数，否则用户按全局默认值排查会走偏。
+  assert.match(String(commandLog.tail().entries.at(-1).hint), /600ms/);
+  await host.close();
+});
+
 test('宿主：激活失败的插件不会把 enabled=true 落盘', async () => {
   const dir = fs.mkdtempSync(path.join(root, 'broken-'));
   const builtin = path.join(dir, 'builtin');

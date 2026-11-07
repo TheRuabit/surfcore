@@ -13,6 +13,9 @@ const ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const RESERVED = new Set(['reset', 'new', 'status', 'role', 'silent', 'quiet', 'active', 'speak']);
 const DEFAULT_RATE_PER_MINUTE = 30;
 const DEFAULT_HANDLER_TIMEOUT_MS = 5000;
+// 单条命令可以声明需要更长的时间（例如要调模型）。上限挡在 3 分钟：
+// 命令挂在入站主链上，再长就会把整个会话的入站处理堵死。
+const MAX_HANDLER_TIMEOUT_MS = 180_000;
 
 function text(value, max = 200) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -70,12 +73,15 @@ function validateSpec(raw) {
     ? raw.scopes.map(String).filter((item) => item === 'group' || item === 'private')
     : ['group', 'private'];
   if (typeof raw.handler !== 'function') throw new Error('command.handler 必须是函数');
+  // 未声明时返回 0，由宿主用全局默认值；声明了才覆盖。
+  const timeoutMs = Number(raw.timeoutMs) > 0 ? Number(raw.timeoutMs) : 0;
   return {
     name,
     aliases,
     permission,
     scopes: scopes.length ? scopes : ['group', 'private'],
     description: text(raw.description ?? '', 160),
+    timeoutMs,
     handler: raw.handler,
   };
 }
@@ -511,12 +517,16 @@ export function createCommandHost({
       logEntry({ ctx: commandCtx, spec, pluginId, outcome: 'rate-limited', code: 'rate-limited', hint: `每个用户每分钟最多 ${perMinute} 次` });
       return { matched: true, outcome: 'rate-limited', command: spec.name, plugin: pluginId };
     }
+    // 每条命令的超时：命令自报的优先，否则用全局默认；都要夹在硬上限内。
+    const effectiveMs = spec.timeoutMs > 0
+      ? Math.max(500, Math.min(MAX_HANDLER_TIMEOUT_MS, spec.timeoutMs))
+      : handlerMs;
     try {
       // 超时保护：命令挂在入站主链上，慢插件会卡住整个会话。
       const result = await Promise.race([
         Promise.resolve().then(() => spec.handler(commandCtx, commandCtx.args)),
         new Promise((_, reject) => {
-          const timer = setTimeout(() => reject(Object.assign(new Error('插件处理超时'), { code: 'plugin-timeout' })), handlerMs);
+          const timer = setTimeout(() => reject(Object.assign(new Error('插件处理超时'), { code: 'plugin-timeout' })), effectiveMs);
           if (typeof timer.unref === 'function') timer.unref();
         }),
       ]);
@@ -542,7 +552,7 @@ export function createCommandHost({
         outcome: 'error',
         code: timedOut ? 'plugin-timeout' : 'plugin-error',
         hint: timedOut
-          ? `插件处理超过 ${handlerMs}ms；查插件里的同步 IO 或外部请求`
+          ? `插件处理超过 ${effectiveMs}ms；查插件里的同步 IO 或外部请求`
           : '查看 bridge.log 的插件堆栈；修正后重载插件',
         durationMs: now() - started,
         message: text(error?.message ?? error, 300),
